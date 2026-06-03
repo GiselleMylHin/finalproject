@@ -1,0 +1,302 @@
+#include "main.h"
+#include "ili9341.h"
+#include "fsr.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+UART_HandleTypeDef hlpuart1;
+
+void SystemClock_Config(void);
+static void GPIO_Config(void);
+static void SPI1_Config(void);
+static void LPUART1_Config(void);
+
+typedef enum
+{
+    ARROW_UP = 0,
+    ARROW_DOWN,
+    ARROW_LEFT,
+    ARROW_RIGHT,
+    ARROW_NONE = 99
+} Arrow;
+
+void uart_print(char *msg)
+{
+    HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+}
+
+Arrow GetPressedFSR(void)
+{
+    if (FSR_IsPressed(FSR_UP)) return ARROW_UP;
+    if (FSR_IsPressed(FSR_DOWN)) return ARROW_DOWN;
+    if (FSR_IsPressed(FSR_LEFT)) return ARROW_LEFT;
+    if (FSR_IsPressed(FSR_RIGHT)) return ARROW_RIGHT;
+
+    return ARROW_NONE;
+}
+
+void WaitFSRRelease(void)
+{
+    while (FSR_IsPressed(FSR_UP) ||
+           FSR_IsPressed(FSR_DOWN) ||
+           FSR_IsPressed(FSR_LEFT) ||
+           FSR_IsPressed(FSR_RIGHT))
+    {
+        HAL_Delay(10);
+    }
+}
+
+void DrawArrow(Arrow arrow)
+{
+    if (arrow == ARROW_UP)
+    {
+        ILI9341_DrawUpArrow(ILI9341_RED);
+        uart_print("TARGET: UP\r\n");
+    }
+    else if (arrow == ARROW_DOWN)
+    {
+        ILI9341_DrawDownArrow(ILI9341_GREEN);
+        uart_print("TARGET: DOWN\r\n");
+    }
+    else if (arrow == ARROW_LEFT)
+    {
+        ILI9341_DrawLeftArrow(ILI9341_BLUE);
+        uart_print("TARGET: LEFT\r\n");
+    }
+    else if (arrow == ARROW_RIGHT)
+    {
+        ILI9341_DrawRightArrow(ILI9341_YELLOW);
+        uart_print("TARGET: RIGHT\r\n");
+    }
+}
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+
+    GPIO_Config();
+    SPI1_Config();
+    LPUART1_Config();
+
+    ILI9341_Init();
+    ILI9341_FillScreen(ILI9341_BLACK);
+
+    FSR_Init();
+
+    srand(HAL_GetTick());
+
+    uart_print("\r\nLCD + FSR ARROW TEST STARTED\r\n");
+
+    while (1)
+    {
+        Arrow target = rand() % 4;
+        DrawArrow(target);
+
+        uint32_t start_time = HAL_GetTick();
+        uint8_t judged = 0;
+
+        while ((HAL_GetTick() - start_time) < 1000)
+        {
+      	  uint16_t up    = FSR_Read(FSR_UP);
+      	  uint16_t down  = FSR_Read(FSR_DOWN);
+      	  uint16_t left  = FSR_Read(FSR_LEFT);
+      	  uint16_t right = FSR_Read(FSR_RIGHT);
+
+      	  char debug[100];
+      	  sprintf(debug, "UP=%u DOWN=%u LEFT=%u RIGHT=%u\r\n", up, down, left, right);
+      	  uart_print(debug);
+
+      	  Arrow pressed = ARROW_NONE;
+
+      	  if (up > 500) pressed = ARROW_UP;
+      	  else if (down > 500) pressed = ARROW_DOWN;
+      	  else if (left > 500) pressed = ARROW_LEFT;
+      	  else if (right > 500) pressed = ARROW_RIGHT;
+
+            if (pressed != ARROW_NONE)
+            {
+                if (pressed == target)
+                {
+                    uart_print("CORRECT\r\n\r\n");
+                    ILI9341_FillScreen(ILI9341_GREEN);
+                }
+                else
+                {
+                    uart_print("WRONG\r\n\r\n");
+                    ILI9341_FillScreen(ILI9341_RED);
+                }
+
+                WaitFSRRelease();
+                judged = 1;
+                break;
+            }
+
+            HAL_Delay(10);
+        }
+
+        if (!judged)
+        {
+            uart_print("MISS - NO PRESS\r\n\r\n");
+            ILI9341_FillScreen(ILI9341_RED);
+        }
+
+        HAL_Delay(100);
+        ILI9341_FillScreen(ILI9341_BLACK);
+        HAL_Delay(200);
+    }
+}
+
+static void GPIO_Config(void)
+{
+    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN;
+    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOCEN;
+    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOGEN;
+
+    HAL_PWREx_EnableVddIO2();
+
+    GPIOA->MODER &= ~((3U << (5 * 2)) | (3U << (7 * 2)));
+    GPIOA->MODER |=  ((2U << (5 * 2)) | (2U << (7 * 2)));
+
+    GPIOA->OTYPER &= ~(GPIO_PIN_5 | GPIO_PIN_7);
+    GPIOA->OSPEEDR |= ((3U << (5 * 2)) | (3U << (7 * 2)));
+    GPIOA->PUPDR &= ~((3U << (5 * 2)) | (3U << (7 * 2)));
+
+    GPIOA->AFR[0] &= ~((0xFU << GPIO_AFRL_AFSEL5_Pos) |
+                       (0xFU << GPIO_AFRL_AFSEL7_Pos));
+
+    GPIOA->AFR[0] |=  ((5U << GPIO_AFRL_AFSEL5_Pos) |
+                       (5U << GPIO_AFRL_AFSEL7_Pos));
+
+    GPIOC->MODER &= ~((3U << (3 * 2)) |
+                      (3U << (4 * 2)) |
+                      (3U << (8 * 2)));
+
+    GPIOC->MODER |=  ((1U << (3 * 2)) |
+                      (1U << (4 * 2)) |
+                      (1U << (8 * 2)));
+
+    GPIOC->OTYPER &= ~(GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_8);
+
+    GPIOC->OSPEEDR |= ((3U << (3 * 2)) |
+                       (3U << (4 * 2)) |
+                       (3U << (8 * 2)));
+
+    GPIOC->PUPDR &= ~((3U << (3 * 2)) |
+                      (3U << (4 * 2)) |
+                      (3U << (8 * 2)));
+
+    GPIOC->BSRR = GPIO_PIN_4;
+    GPIOC->BSRR = GPIO_PIN_8;
+    GPIOC->BRR  = GPIO_PIN_3;
+}
+
+static void SPI1_Config(void)
+{
+    RCC->APB2ENR |= RCC_APB2ENR_SPI1EN;
+
+    SPI1->CR1 &= ~SPI_CR1_SPE;
+
+    SPI1->CR1 = 0;
+    SPI1->CR2 = 0;
+
+    SPI1->CR1 |= SPI_CR1_MSTR;
+    SPI1->CR1 |= SPI_CR1_SSM;
+    SPI1->CR1 |= SPI_CR1_SSI;
+
+    SPI1->CR1 |= SPI_CR1_BIDIMODE;
+    SPI1->CR1 |= SPI_CR1_BIDIOE;
+
+    SPI1->CR1 &= ~SPI_CR1_CPOL;
+    SPI1->CR1 &= ~SPI_CR1_CPHA;
+    SPI1->CR1 &= ~SPI_CR1_LSBFIRST;
+
+    SPI1->CR1 &= ~SPI_CR1_BR;
+    SPI1->CR1 |=  (0U << SPI_CR1_BR_Pos);
+
+    SPI1->CR2 &= ~SPI_CR2_DS;
+    SPI1->CR2 |=  (7U << SPI_CR2_DS_Pos);
+
+    SPI1->CR2 |= SPI_CR2_FRXTH;
+
+    SPI1->CR1 |= SPI_CR1_SPE;
+}
+
+static void LPUART1_Config(void)
+{
+    RCC->APB1ENR2 |= RCC_APB1ENR2_LPUART1EN;
+
+    GPIOG->MODER &= ~((3U << (7 * 2)) | (3U << (8 * 2)));
+    GPIOG->MODER |=  ((2U << (7 * 2)) | (2U << (8 * 2)));
+
+    GPIOG->AFR[0] &= ~(0xFU << GPIO_AFRL_AFSEL7_Pos);
+    GPIOG->AFR[0] |=  (8U << GPIO_AFRL_AFSEL7_Pos);
+
+    GPIOG->AFR[1] &= ~(0xFU << GPIO_AFRH_AFSEL8_Pos);
+    GPIOG->AFR[1] |=  (8U << GPIO_AFRH_AFSEL8_Pos);
+
+    hlpuart1.Instance = LPUART1;
+    hlpuart1.Init.BaudRate = 115200;
+    hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
+    hlpuart1.Init.StopBits = UART_STOPBITS_1;
+    hlpuart1.Init.Parity = UART_PARITY_NONE;
+    hlpuart1.Init.Mode = UART_MODE_TX_RX;
+    hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+    hlpuart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+
+    HAL_UART_Init(&hlpuart1);
+}
+
+void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+    if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+    RCC_OscInitStruct.MSIState = RCC_MSI_ON;
+    RCC_OscInitStruct.MSICalibrationValue = 0;
+    RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK |
+                                  RCC_CLOCKTYPE_SYSCLK |
+                                  RCC_CLOCKTYPE_PCLK1 |
+                                  RCC_CLOCKTYPE_PCLK2;
+
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+    {
+        Error_Handler();
+    }
+}
+
+void Error_Handler(void)
+{
+    __disable_irq();
+
+    while (1)
+    {
+    }
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+}
+#endif
