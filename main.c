@@ -53,28 +53,26 @@ static void Score_UpdateDifficulty(void)
 typedef struct { uint32_t time_ms; uint8_t direction; } Note;
 
 static const Note chart_jagger_easy[] = {
-    {1000,0},{1938,1},{2876,2},{3814,3},{4752,0},{5690,1},
-    {6628,2},{7566,3},{8504,0},{9442,1},{10380,2},{11318,3},
-    {12256,0},{13194,1},{14132,2},{15070,3},{16008,0},{16946,1},
-    {17884,2},{18822,3},{19760,0},{20698,1},{21636,2},{22574,3},
-    {23512,0},{24450,1},{25388,2},{26326,3},{27264,0},{28202,1},
-    {29140,2},{30078,3}
+    {418,0},{4227,1},{8037,2},{11846,3},{15656,0},{19465,1},
+    {23275,2},{27084,3},{30894,0},{34703,1},{38513,2},{42322,3},
+    {46132,0},{49941,1},{53751,2},{57560,3},{61370,0},{65179,1},
+    {68989,2},{72798,3}
 };
 static const Note chart_jagger_medium[] = {
-    {1000,0},{1469,1},{1938,2},{2407,3},{2876,0},{3345,1},
-    {3814,2},{4283,3},{4752,0},{5221,1},{5690,2},{6159,3},
-    {6628,0},{7097,1},{7566,2},{8035,3},{8504,0},{8973,1},
-    {9442,2},{9911,3},{10380,0},{10849,1},{11318,2},{11787,3},
-    {12256,0},{12725,1},{13194,2},{13663,3},{14132,0},{14601,1},
-    {15070,2},{15539,3}
+    {418,0},{2322,1},{4227,2},{6132,3},{8037,0},{9941,1},
+    {11846,2},{13751,3},{15656,0},{17560,1},{19465,2},{21370,3},
+    {23275,0},{25179,1},{27084,2},{28989,3},{30894,0},{32798,1},
+    {34703,2},{36608,3},{38513,0},{40418,1},{42322,2},{44227,3},
+    {46132,0},{48037,1},{49941,2},{51846,3},{53751,0},{55656,1},
+    {57560,2},{59465,3}
 };
 static const Note chart_jagger_hard[] = {
-    {1000,0},{1234,1},{1469,2},{1703,3},{1938,0},{2172,1},
-    {2407,2},{2641,3},{2876,0},{3110,1},{3345,2},{3579,3},
-    {3814,0},{4048,1},{4283,2},{4517,3},{4752,0},{4986,1},
-    {5221,2},{5455,3},{5690,0},{5924,1},{6159,2},{6393,3},
-    {6628,0},{6862,1},{7097,2},{7331,3},{7566,0},{7800,1},
-    {8035,2},{8269,3}
+    {418,0},{1370,1},{2322,2},{3275,3},{4227,0},{5179,1},
+    {6132,2},{7084,3},{8037,0},{8989,1},{9941,2},{10894,3},
+    {11846,0},{12798,1},{13751,2},{14703,3},{15656,0},{16608,1},
+    {17560,2},{18513,3},{19465,0},{20418,1},{21370,2},{22322,3},
+    {23275,0},{24227,1},{25179,2},{26132,3},{27084,0},{28037,1},
+    {28989,2},{29941,3}
 };
 
 typedef struct {
@@ -83,13 +81,16 @@ typedef struct {
     const Note  *easy;
     const Note  *medium;
     const Note  *hard;
-    uint8_t      count;
+    uint8_t      easy_count;
+    uint8_t      medium_count;
+    uint8_t      hard_count;
     uint32_t     duration_ms;
 } Song;
 
 static const Song songs[] = {
     { "MOVES LIKE JAGGER", "0001.mp3",
-      chart_jagger_easy, chart_jagger_medium, chart_jagger_hard, 32,
+      chart_jagger_easy, chart_jagger_medium, chart_jagger_hard,
+      20, 32, 32,
       73000 },
 };
 static const uint8_t NUM_SONGS = 1;
@@ -134,22 +135,6 @@ static void DrawHUD(void)
     sprintf(buf, "SCORE=%lu COMBO=%lu DIFF=%s\r\n",
             score, combo, diff_names[difficulty]);
     uart_print(buf);
-
-    /* Draw score and combo in top-left corner of LCD */
-    char score_buf[20];
-    char combo_buf[20];
-    sprintf(score_buf, "SC:%lu ", score);
-    sprintf(combo_buf, "CB:%lu ", combo);
-    ILI9341_DrawString(2, 2,  score_buf, ILI9341_WHITE, ILI9341_BLACK, 2);
-    ILI9341_DrawString(2, 20, combo_buf, ILI9341_WHITE, ILI9341_BLACK, 2);
-}
-
-static void DrawFeedback(const char *text, uint16_t color)
-{
-    /* Clear feedback area bottom-left corner */
-    ILI9341_FillRect(2, 280, 150, 30, ILI9341_BLACK);
-    /* Draw feedback text */
-    ILI9341_DrawString(2, 285, text, color, ILI9341_BLACK, 2);
 }
 
 static void PlaySong(uint8_t song_idx)
@@ -169,7 +154,10 @@ static void PlaySong(uint8_t song_idx)
     uint32_t song_start = HAL_GetTick();
     uint32_t window     = diff_window[difficulty];
 
-    for (uint8_t i = 0; i < s->count; i++)
+    uint8_t note_count = (difficulty == EASY) ? s->easy_count :
+                         (difficulty == MEDIUM) ? s->medium_count : s->hard_count;
+
+    for (uint8_t i = 0; i < note_count; i++)
     {
         uint32_t note_time = song_start + chart[i].time_ms;
 
@@ -231,13 +219,13 @@ static void PlaySong(uint8_t song_idx)
                 if (pressed == target)
                 {
                     uart_print("HIT!\r\n");
-                    DrawFeedback("PERFECT", ILI9341_GREEN);
+                    ILI9341_FillScreen(ILI9341_GREEN);
                     Score_RecordHit(1);
                 }
                 else
                 {
                     uart_print("WRONG\r\n");
-                    DrawFeedback("MISS", ILI9341_RED);
+                    ILI9341_FillScreen(ILI9341_RED);
                     Score_RecordHit(0);
                 }
 
@@ -248,8 +236,8 @@ static void PlaySong(uint8_t song_idx)
                 { HAL_Delay(10); }
 
                 judged = 1;
-                HAL_Delay(300);
-                DrawFeedback("       ", ILI9341_BLACK);
+                HAL_Delay(100);
+                ILI9341_FillScreen(ILI9341_BLACK);
                 break;
             }
             HAL_Delay(5);
@@ -259,9 +247,9 @@ static void PlaySong(uint8_t song_idx)
         {
             uart_print("MISS\r\n");
             Score_RecordHit(0);
-            DrawFeedback("MISS", ILI9341_RED);
-            HAL_Delay(300);
-            DrawFeedback("       ", ILI9341_BLACK);
+            ILI9341_FillScreen(ILI9341_RED);
+            HAL_Delay(150);
+            ILI9341_FillScreen(ILI9341_BLACK);
         }
 
         if ((i + 1) % 10 == 0) Score_UpdateDifficulty();
@@ -290,6 +278,15 @@ int main(void)
 
     FSR_init();
     DFPlayer_Init(&huart2, &hlpuart1);
+
+    /* TEMP TEST: pulse PLAY pin 3 times on boot to verify GPIO works */
+    for (int i = 0; i < 3; i++)
+    {
+        GPIOB->BRR  = GPIO_PIN_1;
+        HAL_Delay(200);
+        GPIOB->BSRR = GPIO_PIN_1;
+        HAL_Delay(500);
+    }
 
     srand(HAL_GetTick());
 
