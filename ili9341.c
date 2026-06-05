@@ -1,10 +1,8 @@
 /*
  * ili9341.c
- *
- *  Created on: May 26, 2026
- *      Author: Jessica Sierra
+ * Original by Jessica Sierra, May 26 2026
+ * Text rendering added for score/feedback display
  */
-/* LCD control pins */
 
 #include "ili9341.h"
 
@@ -14,193 +12,258 @@
 
 #define CS_LOW()        (GPIOC->BRR  = LCD_CS_PIN)
 #define CS_HIGH()       (GPIOC->BSRR = LCD_CS_PIN)
-
 #define DC_CMD()        (GPIOC->BRR  = LCD_DC_PIN)
 #define DC_DATA()       (GPIOC->BSRR = LCD_DC_PIN)
-
 #define RST_LOW()       (GPIOC->BRR  = LCD_RST_PIN)
 #define RST_HIGH()      (GPIOC->BSRR = LCD_RST_PIN)
 
-static void LCD_SetAddressWindow(uint16_t x0, uint16_t y0,uint16_t x1, uint16_t y1);
+/* ── 5x7 font (ASCII 32-126) ──────────────────────────────────────── */
+static const uint8_t font5x7[][5] = {
+    {0x00,0x00,0x00,0x00,0x00}, /* ' ' */
+    {0x00,0x00,0x5F,0x00,0x00}, /* '!' */
+    {0x00,0x07,0x00,0x07,0x00}, /* '"' */
+    {0x14,0x7F,0x14,0x7F,0x14}, /* '#' */
+    {0x24,0x2A,0x7F,0x2A,0x12}, /* '$' */
+    {0x23,0x13,0x08,0x64,0x62}, /* '%' */
+    {0x36,0x49,0x55,0x22,0x50}, /* '&' */
+    {0x00,0x05,0x03,0x00,0x00}, /* ''' */
+    {0x00,0x1C,0x22,0x41,0x00}, /* '(' */
+    {0x00,0x41,0x22,0x1C,0x00}, /* ')' */
+    {0x08,0x2A,0x1C,0x2A,0x08}, /* '*' */
+    {0x08,0x08,0x3E,0x08,0x08}, /* '+' */
+    {0x00,0x50,0x30,0x00,0x00}, /* ',' */
+    {0x08,0x08,0x08,0x08,0x08}, /* '-' */
+    {0x00,0x60,0x60,0x00,0x00}, /* '.' */
+    {0x20,0x10,0x08,0x04,0x02}, /* '/' */
+    {0x3E,0x51,0x49,0x45,0x3E}, /* '0' */
+    {0x00,0x42,0x7F,0x40,0x00}, /* '1' */
+    {0x42,0x61,0x51,0x49,0x46}, /* '2' */
+    {0x21,0x41,0x45,0x4B,0x31}, /* '3' */
+    {0x18,0x14,0x12,0x7F,0x10}, /* '4' */
+    {0x27,0x45,0x45,0x45,0x39}, /* '5' */
+    {0x3C,0x4A,0x49,0x49,0x30}, /* '6' */
+    {0x01,0x71,0x09,0x05,0x03}, /* '7' */
+    {0x36,0x49,0x49,0x49,0x36}, /* '8' */
+    {0x06,0x49,0x49,0x29,0x1E}, /* '9' */
+    {0x00,0x36,0x36,0x00,0x00}, /* ':' */
+    {0x00,0x56,0x36,0x00,0x00}, /* ';' */
+    {0x00,0x08,0x14,0x22,0x41}, /* '<' */
+    {0x14,0x14,0x14,0x14,0x14}, /* '=' */
+    {0x41,0x22,0x14,0x08,0x00}, /* '>' */
+    {0x02,0x01,0x51,0x09,0x06}, /* '?' */
+    {0x32,0x49,0x79,0x41,0x3E}, /* '@' */
+    {0x7E,0x11,0x11,0x11,0x7E}, /* 'A' */
+    {0x7F,0x49,0x49,0x49,0x36}, /* 'B' */
+    {0x3E,0x41,0x41,0x41,0x22}, /* 'C' */
+    {0x7F,0x41,0x41,0x22,0x1C}, /* 'D' */
+    {0x7F,0x49,0x49,0x49,0x41}, /* 'E' */
+    {0x7F,0x09,0x09,0x09,0x01}, /* 'F' */
+    {0x3E,0x41,0x49,0x49,0x7A}, /* 'G' */
+    {0x7F,0x08,0x08,0x08,0x7F}, /* 'H' */
+    {0x00,0x41,0x7F,0x41,0x00}, /* 'I' */
+    {0x20,0x40,0x41,0x3F,0x01}, /* 'J' */
+    {0x7F,0x08,0x14,0x22,0x41}, /* 'K' */
+    {0x7F,0x40,0x40,0x40,0x40}, /* 'L' */
+    {0x7F,0x02,0x04,0x02,0x7F}, /* 'M' */
+    {0x7F,0x04,0x08,0x10,0x7F}, /* 'N' */
+    {0x3E,0x41,0x41,0x41,0x3E}, /* 'O' */
+    {0x7F,0x09,0x09,0x09,0x06}, /* 'P' */
+    {0x3E,0x41,0x51,0x21,0x5E}, /* 'Q' */
+    {0x7F,0x09,0x19,0x29,0x46}, /* 'R' */
+    {0x46,0x49,0x49,0x49,0x31}, /* 'S' */
+    {0x01,0x01,0x7F,0x01,0x01}, /* 'T' */
+    {0x3F,0x40,0x40,0x40,0x3F}, /* 'U' */
+    {0x1F,0x20,0x40,0x20,0x1F}, /* 'V' */
+    {0x3F,0x40,0x38,0x40,0x3F}, /* 'W' */
+    {0x63,0x14,0x08,0x14,0x63}, /* 'X' */
+    {0x07,0x08,0x70,0x08,0x07}, /* 'Y' */
+    {0x61,0x51,0x49,0x45,0x43}, /* 'Z' */
+    {0x00,0x7F,0x41,0x41,0x00}, /* '[' */
+    {0x02,0x04,0x08,0x10,0x20}, /* '\' */
+    {0x00,0x41,0x41,0x7F,0x00}, /* ']' */
+    {0x04,0x02,0x01,0x02,0x04}, /* '^' */
+    {0x40,0x40,0x40,0x40,0x40}, /* '_' */
+    {0x00,0x01,0x02,0x04,0x00}, /* '`' */
+    {0x20,0x54,0x54,0x54,0x78}, /* 'a' */
+    {0x7F,0x48,0x44,0x44,0x38}, /* 'b' */
+    {0x38,0x44,0x44,0x44,0x20}, /* 'c' */
+    {0x38,0x44,0x44,0x48,0x7F}, /* 'd' */
+    {0x38,0x54,0x54,0x54,0x18}, /* 'e' */
+    {0x08,0x7E,0x09,0x01,0x02}, /* 'f' */
+    {0x08,0x14,0x54,0x54,0x3C}, /* 'g' */
+    {0x7F,0x08,0x04,0x04,0x78}, /* 'h' */
+    {0x00,0x44,0x7D,0x40,0x00}, /* 'i' */
+    {0x20,0x40,0x44,0x3D,0x00}, /* 'j' */
+    {0x7F,0x10,0x28,0x44,0x00}, /* 'k' */
+    {0x00,0x41,0x7F,0x40,0x00}, /* 'l' */
+    {0x7C,0x04,0x18,0x04,0x78}, /* 'm' */
+    {0x7C,0x08,0x04,0x04,0x78}, /* 'n' */
+    {0x38,0x44,0x44,0x44,0x38}, /* 'o' */
+    {0x7C,0x14,0x14,0x14,0x08}, /* 'p' */
+    {0x08,0x14,0x14,0x18,0x7C}, /* 'q' */
+    {0x7C,0x08,0x04,0x04,0x08}, /* 'r' */
+    {0x48,0x54,0x54,0x54,0x20}, /* 's' */
+    {0x04,0x3F,0x44,0x40,0x20}, /* 't' */
+    {0x3C,0x40,0x40,0x40,0x3C}, /* 'u' */
+    {0x1C,0x20,0x40,0x20,0x1C}, /* 'v' */
+    {0x3C,0x40,0x30,0x40,0x3C}, /* 'w' */
+    {0x44,0x28,0x10,0x28,0x44}, /* 'x' */
+    {0x0C,0x50,0x50,0x50,0x3C}, /* 'y' */
+    {0x44,0x64,0x54,0x4C,0x44}, /* 'z' */
+    {0x00,0x08,0x36,0x41,0x00}, /* '{' */
+    {0x00,0x00,0x7F,0x00,0x00}, /* '|' */
+    {0x00,0x41,0x36,0x08,0x00}, /* '}' */
+    {0x08,0x08,0x2A,0x1C,0x08}, /* '~' */
+};
+
+static void LCD_SetAddressWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
 static void LCD_SPI_WriteByte(uint8_t data);
 static void LCD_SPI_WaitDone(void);
 
 static void LCD_SPI_WriteByte(uint8_t data)
 {
-    while (!(SPI1->SR & SPI_SR_TXE))
-        ;
-
+    while (!(SPI1->SR & SPI_SR_TXE));
     *((volatile uint8_t *)&SPI1->DR) = data;
 }
 
 static void LCD_SPI_WaitDone(void)
 {
-    while (!(SPI1->SR & SPI_SR_TXE))
-        ;
-
-    while (SPI1->SR & SPI_SR_BSY)
-        ;
+    while (!(SPI1->SR & SPI_SR_TXE));
+    while (SPI1->SR & SPI_SR_BSY);
 }
 
 static void LCD_WriteCommand(uint8_t cmd)
 {
-    DC_CMD();
-    CS_LOW();
-
+    DC_CMD(); CS_LOW();
     LCD_SPI_WriteByte(cmd);
     LCD_SPI_WaitDone();
-
     CS_HIGH();
 }
 
 static void LCD_WriteData(uint8_t data)
 {
-    DC_DATA();
-    CS_LOW();
-
+    DC_DATA(); CS_LOW();
     LCD_SPI_WriteByte(data);
     LCD_SPI_WaitDone();
-
     CS_HIGH();
 }
 
 static void LCD_Reset(void)
 {
-    RST_LOW();
-    HAL_Delay(20);
-
-    RST_HIGH();
-    HAL_Delay(120);
+    RST_LOW(); HAL_Delay(20);
+    RST_HIGH(); HAL_Delay(120);
 }
 
-static void LCD_SetAddressWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1){
+static void LCD_SetAddressWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
     LCD_WriteCommand(0x2A);
-    LCD_WriteData(x0 >> 8);
-    LCD_WriteData(x0 & 0xFF);
-    LCD_WriteData(x1 >> 8);
-    LCD_WriteData(x1 & 0xFF);
-
+    LCD_WriteData(x0 >> 8); LCD_WriteData(x0 & 0xFF);
+    LCD_WriteData(x1 >> 8); LCD_WriteData(x1 & 0xFF);
     LCD_WriteCommand(0x2B);
-    LCD_WriteData(y0 >> 8);
-    LCD_WriteData(y0 & 0xFF);
-    LCD_WriteData(y1 >> 8);
-    LCD_WriteData(y1 & 0xFF);
-
+    LCD_WriteData(y0 >> 8); LCD_WriteData(y0 & 0xFF);
+    LCD_WriteData(y1 >> 8); LCD_WriteData(y1 & 0xFF);
     LCD_WriteCommand(0x2C);
 }
 
-void ILI9341_Init(void){
-    CS_HIGH();
-    RST_HIGH();
-
+void ILI9341_Init(void)
+{
+    CS_HIGH(); RST_HIGH();
     LCD_Reset();
-
-    LCD_WriteCommand(0x01);
-    HAL_Delay(150);
-
+    LCD_WriteCommand(0x01); HAL_Delay(150);
     LCD_WriteCommand(0x28);
-
-    LCD_WriteCommand(0x3A);
-    LCD_WriteData(0x55);
-
-    LCD_WriteCommand(0x36);
-    LCD_WriteData(0x48);
-
-    LCD_WriteCommand(0x11);
-    HAL_Delay(120);
-
-    LCD_WriteCommand(0x29);
-    HAL_Delay(20);
+    LCD_WriteCommand(0x3A); LCD_WriteData(0x55);
+    LCD_WriteCommand(0x36); LCD_WriteData(0x48);
+    LCD_WriteCommand(0x11); HAL_Delay(120);
+    LCD_WriteCommand(0x29); HAL_Delay(20);
 }
 
-void ILI9341_FillScreen(uint16_t color){
-    uint8_t hi = color >> 8;
-    uint8_t lo = color & 0xFF;
-
-    LCD_SetAddressWindow(0, 0, ILI9341_WIDTH - 1, ILI9341_HEIGHT - 1);
-
-    DC_DATA();
-    CS_LOW();
-
-    for (uint32_t i = 0; i < ILI9341_WIDTH * ILI9341_HEIGHT; i++){
+void ILI9341_FillScreen(uint16_t color)
+{
+    uint8_t hi = color >> 8, lo = color & 0xFF;
+    LCD_SetAddressWindow(0, 0, ILI9341_WIDTH-1, ILI9341_HEIGHT-1);
+    DC_DATA(); CS_LOW();
+    for (uint32_t i = 0; i < ILI9341_WIDTH * ILI9341_HEIGHT; i++)
+    {
         LCD_SPI_WriteByte(hi);
         LCD_SPI_WriteByte(lo);
     }
-
-    LCD_SPI_WaitDone();
-    CS_HIGH();
+    LCD_SPI_WaitDone(); CS_HIGH();
 }
 
-void ILI9341_FillRect(uint16_t x, uint16_t y,uint16_t w, uint16_t h,uint16_t color){
-    uint8_t hi = color >> 8;
-    uint8_t lo = color & 0xFF;
-
-    LCD_SetAddressWindow(x, y, x + w - 1, y + h - 1);
-
-    DC_DATA();
-    CS_LOW();
-
-    for (uint32_t i = 0; i < (uint32_t)w * h; i++){
+void ILI9341_FillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
+{
+    uint8_t hi = color >> 8, lo = color & 0xFF;
+    LCD_SetAddressWindow(x, y, x+w-1, y+h-1);
+    DC_DATA(); CS_LOW();
+    for (uint32_t i = 0; i < (uint32_t)w*h; i++)
+    {
         LCD_SPI_WriteByte(hi);
         LCD_SPI_WriteByte(lo);
     }
-
-    LCD_SPI_WaitDone();
-    CS_HIGH();
+    LCD_SPI_WaitDone(); CS_HIGH();
 }
 
+/* ── Text rendering ───────────────────────────────────────────────── */
+void ILI9341_DrawChar(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg, uint8_t size)
+{
+    if (c < 32 || c > 126) c = '?';
+    const uint8_t *glyph = font5x7[c - 32];
+
+    for (uint8_t col = 0; col < 5; col++)
+    {
+        uint8_t line = glyph[col];
+        for (uint8_t row = 0; row < 7; row++)
+        {
+            uint16_t px = x + col * size;
+            uint16_t py = y + row * size;
+            uint16_t pcolor = (line & (1 << row)) ? color : bg;
+            ILI9341_FillRect(px, py, size, size, pcolor);
+        }
+    }
+    /* 1-pixel gap between chars */
+    ILI9341_FillRect(x + 5*size, y, size, 7*size, bg);
+}
+
+void ILI9341_DrawString(uint16_t x, uint16_t y, const char *str, uint16_t color, uint16_t bg, uint8_t size)
+{
+    uint16_t cx = x;
+    while (*str)
+    {
+        ILI9341_DrawChar(cx, y, *str, color, bg, size);
+        cx += 6 * size; /* 5px char + 1px gap */
+        str++;
+    }
+}
+
+/* ── Arrows ───────────────────────────────────────────────────────── */
 void ILI9341_DrawUpArrow(uint16_t color)
 {
     ILI9341_FillScreen(ILI9341_BLACK);
-
-    /* Arrow head: point at top */
     for (int i = 0; i < 50; i++)
-    {
-        ILI9341_FillRect(120 - i, 50 + i, (2 * i) + 1, 1, color);
-    }
-
-    /* Shaft */
+        ILI9341_FillRect(120-i, 50+i, (2*i)+1, 1, color);
     ILI9341_FillRect(115, 100, 10, 120, color);
 }
 
 void ILI9341_DrawDownArrow(uint16_t color)
 {
     ILI9341_FillScreen(ILI9341_BLACK);
-
-    /* Arrow head: point at bottom */
     for (int i = 0; i < 50; i++)
-    {
-        ILI9341_FillRect(120 - i, 220 - i, (2 * i) + 1, 1, color);
-    }
-
-    /* Shaft */
+        ILI9341_FillRect(120-i, 220-i, (2*i)+1, 1, color);
     ILI9341_FillRect(115, 50, 10, 120, color);
 }
 
 void ILI9341_DrawLeftArrow(uint16_t color)
 {
     ILI9341_FillScreen(ILI9341_BLACK);
-
-    /* Arrow head: point at left */
     for (int i = 0; i < 50; i++)
-    {
-        ILI9341_FillRect(50 + i, 120 - i, 1, (2 * i) + 1, color);
-    }
-
-    /* Shaft */
+        ILI9341_FillRect(50+i, 120-i, 1, (2*i)+1, color);
     ILI9341_FillRect(100, 115, 100, 10, color);
 }
 
 void ILI9341_DrawRightArrow(uint16_t color)
 {
     ILI9341_FillScreen(ILI9341_BLACK);
-
-    /* Arrow head: point at right */
     for (int i = 0; i < 50; i++)
-    {
-        ILI9341_FillRect(190 - i, 120 - i, 1, (2 * i) + 1, color);
-    }
-
-    /* Shaft */
+        ILI9341_FillRect(190-i, 120-i, 1, (2*i)+1, color);
     ILI9341_FillRect(40, 115, 100, 10, color);
 }
