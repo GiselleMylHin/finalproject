@@ -21,14 +21,11 @@ static const uint32_t diff_window[] = { 1500, 1000, 700 };
 
 #define HISTORY_SIZE 20
 static uint8_t  hit_history[HISTORY_SIZE];
-static uint8_t  history_idx  = 0;
-static uint8_t  history_full = 0;
-static uint32_t score        = 0;
-static uint32_t combo        = 0;
-static Difficulty difficulty  = EASY;
-
-/* Adaptive mode flag - set by menu */
-static uint8_t adaptive_mode = 0;
+static uint8_t  history_idx      = 0;
+static uint8_t  history_full     = 0;
+static uint32_t score            = 0;
+static uint32_t combo            = 0;
+static Difficulty difficulty   = HARD;
 
 /* 50-arrow accuracy tracking for Spec 1d */
 #define ACC50_SIZE 50
@@ -37,8 +34,22 @@ static uint8_t  acc50_idx  = 0;
 static uint8_t  acc50_full = 0;
 static uint32_t acc50_total_presses = 0;
 
-/* Forward declaration */
-void uart_print(char *msg);
+/* --- Game State Machine --- */
+typedef enum {
+    STATE_MAIN_MENU,
+    STATE_DIFFICULTY_MENU,
+    STATE_READY_TO_PLAY,
+    STATE_PLAYING
+} GameState;
+
+static GameState current_state = STATE_MAIN_MENU;
+static int8_t menu_index = 0;
+
+#define MENU_ITEMS_MAIN 2
+static const char *main_menu_strings[MENU_ITEMS_MAIN] = {
+    "1. MOVES LIKE JAGGER",
+    "2. CALIBRATE FSR"
+};
 
 static void Score_RecordHit(uint8_t hit)
 {
@@ -73,7 +84,6 @@ static void Score_RecordHit(uint8_t hit)
 
 static void Score_UpdateDifficulty(void)
 {
-    if (!adaptive_mode) return; /* only adjust difficulty in adaptive mode */
     uint8_t count = history_full ? HISTORY_SIZE : history_idx;
     if (count < 20) return; /* need at least 20 steps per spec */
     uint32_t hits = 0;
@@ -172,109 +182,32 @@ static uint8_t PB0_WasPressed(void)
     return 0;
 }
 
-/* Returns 1 if PB0 is HIGH (not pressed), 0 if LOW (pressed) */
-static uint8_t PB0_IsHigh(void)
+static uint8_t Scroll_WasPressed(void)
 {
-    return (GPIOB->IDR & GPIO_PIN_0) ? 1 : 0;
-}
-
-/* B1 = PC13, active low (Nucleo USER button) */
-static uint8_t B1_WasPressed(void)
-{
-    if ((GPIOC->IDR & GPIO_PIN_13) == 0)
+    if ((GPIOC->IDR & GPIO_PIN_10) == 0)
     {
-        HAL_Delay(50);
-        if ((GPIOC->IDR & GPIO_PIN_13) == 0)
+        HAL_Delay(40);
+        if ((GPIOC->IDR & GPIO_PIN_10) == 0)
         {
-            while ((GPIOC->IDR & GPIO_PIN_13) == 0) HAL_Delay(10);
+            while ((GPIOC->IDR & GPIO_PIN_10) == 0) HAL_Delay(10);
             return 1;
         }
     }
     return 0;
 }
 
-/* ── Splash + Menu ────────────────────────────────────────────────
- * Shows title screen then lets user pick difficulty.
- * B1 = cycle, PB0 = confirm
- * Returns selected difficulty (or HARD for ADAPTIVE which sets
- * adaptive_mode flag).
- * ─────────────────────────────────────────────────────────────── */
-static void ShowSplash(void)
+static uint8_t Select_WasPressed(void)
 {
-    ILI9341_FillScreen(ILI9341_BLACK);
-
-    /* Title - big and pink/magenta */
-    ILI9341_DrawString(10,  40, "MOVES",  ILI9341_MAGENTA, ILI9341_BLACK, 4);
-    ILI9341_DrawString(10,  90, "LIKE",   ILI9341_MAGENTA, ILI9341_BLACK, 4);
-    ILI9341_DrawString(10, 140, "JAGGER", ILI9341_MAGENTA, ILI9341_BLACK, 4);
-
-    /* Subtitle */
-    ILI9341_DrawString(30, 210, "EE329 PROJECT", ILI9341_WHITE, ILI9341_BLACK, 1);
-    ILI9341_DrawString(20, 225, "BY JAG TEAM :)", ILI9341_CYAN,  ILI9341_BLACK, 1);
-
-    HAL_Delay(2500);
-}
-
-static Difficulty ShowMenu(void)
-{
-    /* Wait for any button noise to settle */
-    HAL_Delay(500);
-
-    const char *options[] = { "EASY", "MEDIUM", "HARD", "ADAPTIVE" };
-    const uint16_t colors[] = { ILI9341_GREEN, ILI9341_YELLOW, ILI9341_RED, ILI9341_CYAN };
-    uint8_t selected = 2; /* default HARD */
-
-    while (1)
+    if ((GPIOC->IDR & GPIO_PIN_11) == 0)
     {
-        ILI9341_FillScreen(ILI9341_BLACK);
-
-        /* Header */
-        ILI9341_DrawString(20, 10, "SELECT MODE", ILI9341_WHITE, ILI9341_BLACK, 2);
-        ILI9341_DrawString(5, 30, "B1=CYCLE  PB0=START", ILI9341_WHITE, ILI9341_BLACK, 1);
-
-        /* Draw all options */
-        for (uint8_t j = 0; j < 4; j++)
+        HAL_Delay(40);
+        if ((GPIOC->IDR & GPIO_PIN_11) == 0)
         {
-            uint16_t y = 70 + j * 55;
-            if (j == selected)
-            {
-                /* Highlight selected */
-                ILI9341_FillRect(0, y - 5, 240, 45, colors[j]);
-                ILI9341_DrawString(10, y + 8, options[j], ILI9341_BLACK, colors[j], 2);
-                ILI9341_DrawString(190, y + 8, "<", ILI9341_BLACK, colors[j], 2);
-            }
-            else
-            {
-                ILI9341_DrawString(10, y + 8, options[j], colors[j], ILI9341_BLACK, 2);
-            }
-        }
-
-        /* Wait for input:
-         * B1 = cycle through options
-         * PB0 = start game with selected mode (original start behavior) */
-        while (1)
-        {
-            if (B1_WasPressed())
-            {
-                selected = (selected + 1) % 4;
-                break; /* redraw menu */
-            }
-            /* PB0 - same check as original "press to start" */
-            if (!PB0_IsHigh())
-            {
-                HAL_Delay(50);
-                if (!PB0_IsHigh())
-                {
-                    while (!PB0_IsHigh()) HAL_Delay(10);
-                    uart_print("PB0 - GAME START\r\n");
-                    ILI9341_FillScreen(ILI9341_BLACK);
-                    if (selected == 3) { adaptive_mode = 1; return HARD; }
-                    else               { adaptive_mode = 0; return (Difficulty)selected; }
-                }
-            }
-            HAL_Delay(10);
+            while ((GPIOC->IDR & GPIO_PIN_11) == 0) HAL_Delay(10);
+            return 1;
         }
     }
+    return 0;
 }
 
 void DrawArrow(Arrow arrow)
@@ -317,6 +250,45 @@ static void DrawFeedback(const char *text, uint16_t color)
     ILI9341_DrawString(2, 283, text, color, ILI9341_BLACK, 2);
 }
 
+static void UI_RenderMainMenu(void)
+{
+    ILI9341_FillScreen(ILI9341_BLACK);
+    ILI9341_DrawString(10, 20, "=== SELECT ITEM ===", ILI9341_CYAN, ILI9341_BLACK, 2);
+    for (int i = 0; i < MENU_ITEMS_MAIN; i++)
+    {
+        uint16_t color = (i == menu_index) ? ILI9341_YELLOW : ILI9341_WHITE;
+        uint16_t bg    = (i == menu_index) ? ILI9341_BLUE   : ILI9341_BLACK;
+        ILI9341_DrawString(15, 70 + (i * 35), main_menu_strings[i], color, bg, 2);
+    }
+}
+
+static void UI_RenderDifficultyMenu(void)
+{
+    ILI9341_FillScreen(ILI9341_BLACK);
+    ILI9341_DrawString(10, 20, "SET START DIFFICULTY", ILI9341_CYAN, ILI9341_BLACK, 2);
+    for (int i = 0; i < 3; i++)
+    {
+        uint16_t color = (i == menu_index) ? ILI9341_YELLOW : ILI9341_WHITE;
+        uint16_t bg    = (i == menu_index) ? ILI9341_BLUE   : ILI9341_BLACK;
+        ILI9341_DrawString(35, 75 + (i * 35), diff_names[i], color, bg, 2);
+    }
+}
+
+static void UI_RenderReadyScreen(void)
+{
+    ILI9341_FillScreen(ILI9341_BLACK);
+    ILI9341_DrawString(20, 50, "STAGE READY!", ILI9341_GREEN, ILI9341_BLACK, 3);
+
+    char details[40];
+    sprintf(details, "Track: %s", songs[current_song].name);
+    ILI9341_DrawString(15, 110, details, ILI9341_WHITE, ILI9341_BLACK, 2);
+
+    sprintf(details, "Start: %s", diff_names[difficulty]);
+    ILI9341_DrawString(15, 140, details, ILI9341_WHITE, ILI9341_BLACK, 2);
+
+    ILI9341_DrawString(10, 220, "PRESS PB0 TO START!", ILI9341_YELLOW, ILI9341_BLACK, 2);
+}
+
 static void PlaySong(uint8_t song_idx)
 {
     const Song *s = &songs[song_idx];
@@ -332,6 +304,8 @@ static void PlaySong(uint8_t song_idx)
     uint8_t  hard_idx    = 0;
     uint8_t  total_notes = 0;
     Difficulty last_diff = difficulty;
+
+    ILI9341_FillScreen(ILI9341_BLACK);
 
     while (1)
     {
@@ -515,7 +489,6 @@ song_done:
     /* ── End screen ─────────────────────────────────────────── */
     ILI9341_FillScreen(ILI9341_BLACK);
 
-    /* Pick message based on score */
     const char *msg;
     if      (score >= 300) msg = "AMAZING!";
     else if (score >= 200) msg = "GREAT JOB!";
@@ -523,17 +496,14 @@ song_done:
     else if (score >= 50)  msg = "KEEP IT UP";
     else                   msg = "PRACTICE!";
 
-    /* Draw message centered */
     ILI9341_DrawString(20, 60,  msg,          ILI9341_YELLOW, ILI9341_BLACK, 3);
 
-    /* Draw score */
     char end_sc[30], end_cb[30];
     sprintf(end_sc, "SCORE: %lu", score);
     sprintf(end_cb, "COMBO: %lu", combo);
     ILI9341_DrawString(20, 130, end_sc, ILI9341_WHITE,  ILI9341_BLACK, 2);
     ILI9341_DrawString(20, 155, end_cb, ILI9341_YELLOW, ILI9341_BLACK, 2);
 
-    /* Draw difficulty */
     char end_df[30];
     sprintf(end_df, "DIFF: %s", diff_names[difficulty]);
     ILI9341_DrawString(20, 180, end_df, ILI9341_CYAN, ILI9341_BLACK, 2);
@@ -558,7 +528,7 @@ int main(void)
     FSR_Calibrate();
     DFPlayer_Init(&huart2, &hlpuart1);
 
-    /* TEMP TEST: pulse PLAY pin 3 times on boot to verify GPIO works */
+    /* TEMP TEST: pulse PLAY pin 3 times on boot */
     for (int i = 0; i < 3; i++)
     {
         GPIOB->BRR  = GPIO_PIN_1;
@@ -567,44 +537,94 @@ int main(void)
         HAL_Delay(500);
     }
 
-    /* Re-configure PB0 as input with pull-up after DFPlayer init and boot pulse */
-    GPIOB->MODER &= ~(3U << (0*2));
-    GPIOB->PUPDR &= ~(3U << (0*2));
-    GPIOB->PUPDR |=  (1U << (0*2));
-
     srand(HAL_GetTick());
 
-    uart_print("\r\n=== MOVE LIKE JAGGER STARTED ===\r\n");
+    uart_print("\r\n=== GAME ENGINE READY ===\r\n");
 
-    ShowSplash();
-    difficulty = ShowMenu();
-
-    char mbuf[48];
-    sprintf(mbuf, "MODE: %s ADAPTIVE=%d\r\n", diff_names[difficulty], adaptive_mode);
-    uart_print(mbuf);
+    // Jump to Menu Engine
+    current_state = STATE_MAIN_MENU;
+    menu_index = 0;
+    UI_RenderMainMenu();
 
     while (1)
     {
-        PlaySong(current_song);
-        current_song = (current_song + 1) % NUM_SONGS;
-        score = combo = 0;
-        history_idx = history_full = 0;
-        memset(hit_history, 0, sizeof(hit_history));
-        acc50_idx = acc50_full = acc50_total_presses = 0;
-        memset(acc50_history, 0, sizeof(acc50_history));
+        switch (current_state)
+        {
+            case STATE_MAIN_MENU:
+                if (Scroll_WasPressed())
+                {
+                    menu_index = (menu_index + 1) % MENU_ITEMS_MAIN;
+                    UI_RenderMainMenu();
+                }
+                if (Select_WasPressed())
+                {
+                    if (menu_index == 0) // Track selection
+                    {
+                        current_song = 0;
+                        menu_index = (int8_t)difficulty; // Initial highlight map to dynamic diff
+                        current_state = STATE_DIFFICULTY_MENU;
+                        UI_RenderDifficultyMenu();
+                    }
+                    else if (menu_index == 1) // Recalibration
+                    {
+                        uart_print("RE-CALIBRATING FSR SENSORS...\r\n");
+                        FSR_Calibrate();
+                        UI_RenderMainMenu();
+                    }
+                }
+                break;
 
-        uart_print("Press PB0 or B1 to play again!\r\n");
-        difficulty = ShowMenu();
-        char rmbuf[48];
-        sprintf(rmbuf, "MODE: %s ADAPTIVE=%d\r\n", diff_names[difficulty], adaptive_mode);
-        uart_print(rmbuf);
+            case STATE_DIFFICULTY_MENU:
+                if (Scroll_WasPressed())
+                {
+                    menu_index = (menu_index + 1) % 3;
+                    UI_RenderDifficultyMenu();
+                }
+                if (Select_WasPressed())
+                {
+                    difficulty = (Difficulty)menu_index;
+                    current_state = STATE_READY_TO_PLAY;
+                    UI_RenderReadyScreen();
+                }
+                break;
+
+            case STATE_READY_TO_PLAY:
+                if (PB0_WasPressed())
+                {
+                    current_state = STATE_PLAYING;
+                }
+                if (Select_WasPressed()) // Fallback shortcut back to top menu
+                {
+                    menu_index = 0;
+                    current_state = STATE_MAIN_MENU;
+                    UI_RenderMainMenu();
+                }
+                break;
+
+            case STATE_PLAYING:
+                PlaySong(current_song);
+
+                /* Reset runtime score matrices completely */
+                score = combo = 0;
+                history_idx = history_full = 0;
+                memset(hit_history, 0, sizeof(hit_history));
+                acc50_idx = acc50_full = acc50_total_presses = 0;
+                memset(acc50_history, 0, sizeof(acc50_history));
+
+                /* Automatically return seamlessly to top option flow */
+                menu_index = 0;
+                current_state = STATE_MAIN_MENU;
+                UI_RenderMainMenu();
+                break;
+        }
+        HAL_Delay(10);
     }
 }
 
 static void GPIO_Config(void)
 {
     RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN | RCC_AHB2ENR_GPIOCEN |
-                    RCC_AHB2ENR_GPIOGEN  | RCC_AHB2ENR_GPIOBEN;
+                    RCC_AHB2ENR_GPIOGEN | RCC_AHB2ENR_GPIOBEN;
     HAL_PWREx_EnableVddIO2();
 
     GPIOA->MODER &= ~((3U << (2*2)) | (3U << (3*2)));
@@ -615,14 +635,12 @@ static void GPIO_Config(void)
     GPIOA->AFR[0]  &= ~((0xFU << GPIO_AFRL_AFSEL2_Pos) | (0xFU << GPIO_AFRL_AFSEL3_Pos));
     GPIOA->AFR[0]  |=  ((7U << GPIO_AFRL_AFSEL2_Pos) | (7U << GPIO_AFRL_AFSEL3_Pos));
 
+    // PB0 Configuration
     GPIOB->MODER &= ~(3U << (0*2));
     GPIOB->PUPDR &= ~(3U << (0*2));
     GPIOB->PUPDR |=  (1U << (0*2));
 
-    /* PC13 = B1 USER button, input no pull (has onboard pull-up) */
-    GPIOC->MODER &= ~(3U << (13*2));
-    GPIOC->PUPDR &= ~(3U << (13*2));
-
+    // SPI GPIO Configs (PA5, PA7)
     GPIOA->MODER &= ~((3U << (5*2)) | (3U << (7*2)));
     GPIOA->MODER |=  ((2U << (5*2)) | (2U << (7*2)));
     GPIOA->OTYPER  &= ~(GPIO_PIN_5 | GPIO_PIN_7);
@@ -631,6 +649,7 @@ static void GPIO_Config(void)
     GPIOA->AFR[0]  &= ~((0xFU << GPIO_AFRL_AFSEL5_Pos) | (0xFU << GPIO_AFRL_AFSEL7_Pos));
     GPIOA->AFR[0]  |=  ((5U << GPIO_AFRL_AFSEL5_Pos) | (5U << GPIO_AFRL_AFSEL7_Pos));
 
+    // Display Control Pins (PC3, PC4, PC8)
     GPIOC->MODER &= ~((3U << (3*2)) | (3U << (4*2)) | (3U << (8*2)));
     GPIOC->MODER |=  ((1U << (3*2)) | (1U << (4*2)) | (1U << (8*2)));
     GPIOC->OTYPER  &= ~(GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_8);
@@ -639,6 +658,11 @@ static void GPIO_Config(void)
     GPIOC->BSRR = GPIO_PIN_4;
     GPIOC->BSRR = GPIO_PIN_8;
     GPIOC->BRR  = GPIO_PIN_3;
+
+    /* --- NEW MENU BUTTONS: PC10 (Scroll) and PC11 (Select) Configuration --- */
+    GPIOC->MODER  &= ~((3U << (10*2)) | (3U << (11*2))); // Mode: Input
+    GPIOC->PUPDR  &= ~((3U << (10*2)) | (3U << (11*2))); // Clear Pull configuration
+    GPIOC->PUPDR  |=  ((1U << (10*2)) | (1U << (11*2))); // Set Pull-up
 }
 
 static void SPI1_Config(void)
@@ -699,14 +723,14 @@ void SystemClock_Config(void)
     RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
     RCC_OscInitStruct.MSIState = RCC_MSI_ON;
     RCC_OscInitStruct.MSICalibrationValue = 0;
-    RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6; /* 4MHz MSI for PLL input */
+    RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
     RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
     RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
     RCC_OscInitStruct.PLL.PLLM = 1;
     RCC_OscInitStruct.PLL.PLLN = 40;
     RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV7;
     RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
-    RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2; /* 4MHz * 40 / 2 = 80MHz */
+    RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
     if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
     RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK|
                                   RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
