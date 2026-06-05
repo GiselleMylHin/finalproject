@@ -17,7 +17,7 @@ static void USART2_Config(void);
 
 typedef enum { EASY = 0, MEDIUM = 1, HARD = 2 } Difficulty;
 static const char *diff_names[] = { "EASY", "MEDIUM", "HARD" };
-static const uint32_t diff_window[] = { 400, 400, 400 };
+static const uint32_t diff_window[] = { 1500, 1000, 700 };
 
 #define HISTORY_SIZE 20
 static uint8_t  hit_history[HISTORY_SIZE];
@@ -25,7 +25,14 @@ static uint8_t  history_idx  = 0;
 static uint8_t  history_full = 0;
 static uint32_t score        = 0;
 static uint32_t combo        = 0;
-static Difficulty difficulty  = EASY;
+static Difficulty difficulty  = HARD;
+
+/* 50-arrow accuracy tracking for Spec 1d */
+#define ACC50_SIZE 50
+static uint8_t  acc50_history[ACC50_SIZE];
+static uint8_t  acc50_idx  = 0;
+static uint8_t  acc50_full = 0;
+static uint32_t acc50_total_presses = 0;
 
 static void Score_RecordHit(uint8_t hit)
 {
@@ -34,20 +41,53 @@ static void Score_RecordHit(uint8_t hit)
     if (history_idx == 0) history_full = 1;
     if (hit) { score += (10 * (combo + 1)); combo++; }
     else      { combo = 0; }
+
+    /* 50-arrow accuracy tracking */
+    acc50_history[acc50_idx] = hit;
+    acc50_idx = (acc50_idx + 1) % ACC50_SIZE;
+    if (acc50_idx == 0) acc50_full = 1;
+    acc50_total_presses++;
+
+    /* Print accuracy every 50 presses */
+    if (acc50_total_presses % 50 == 0)
+    {
+        uint8_t count = acc50_full ? ACC50_SIZE : acc50_idx;
+        uint32_t hits = 0;
+        for (uint8_t i = 0; i < count; i++) hits += acc50_history[i];
+        uint32_t acc = (hits * 100) / count;
+        char abuf[64];
+        sprintf(abuf, "=== 50-ARROW ACCURACY: %lu%% ===\r\n", acc);
+        uart_print(abuf);
+        if (acc >= 95)
+            uart_print("SPEC 1d: PASS (>=95%%)\r\n");
+        else
+            uart_print("SPEC 1d: FAIL (<95%%)\r\n");
+    }
 }
 
 static void Score_UpdateDifficulty(void)
 {
     uint8_t count = history_full ? HISTORY_SIZE : history_idx;
-    if (count < 10) return;
+    if (count < 20) return; /* need at least 20 steps per spec */
     uint32_t hits = 0;
     for (uint8_t i = 0; i < count; i++) hits += hit_history[i];
-    uint32_t accuracy = (hits * 100) / count;
-    char buf[64];
-    sprintf(buf, "ACCURACY=%lu%% DIFF=%s\r\n", accuracy, diff_names[difficulty]);
+    uint32_t accuracy  = (hits * 100) / count;
+    uint32_t miss_rate = 100 - accuracy;
+    char buf[80];
+    sprintf(buf, "ACCURACY=%lu%% MISS=%lu%% COMBO=%lu DIFF=%s\r\n",
+            accuracy, miss_rate, combo, diff_names[difficulty]);
     HAL_UART_Transmit(&hlpuart1, (uint8_t*)buf, strlen(buf), HAL_MAX_DELAY);
-    if (accuracy >= 85 && difficulty < HARD)      difficulty++;
+
+    Difficulty old_diff = difficulty;
+    if      (accuracy >= 85 && difficulty < HARD) difficulty++;
     else if (accuracy <= 60 && difficulty > EASY) difficulty--;
+
+    if (difficulty != old_diff)
+    {
+        char dbuf[48];
+        sprintf(dbuf, "DIFFICULTY -> %s\r\n", diff_names[difficulty]);
+        HAL_UART_Transmit(&hlpuart1, (uint8_t*)dbuf, strlen(dbuf), HAL_MAX_DELAY);
+    }
 }
 
 typedef struct { uint32_t time_ms; uint8_t direction; } Note;
@@ -56,7 +96,7 @@ static const Note chart_jagger_easy[] = {
     {418,0},{4227,1},{8037,2},{11846,3},{15656,0},{19465,1},
     {23275,2},{27084,3},{30894,0},{34703,1},{38513,2},{42322,3},
     {46132,0},{49941,1},{53751,2},{57560,3},{61370,0},{65179,1},
-    {68989,2},{72798,3}
+    {68989,2}
 };
 static const Note chart_jagger_medium[] = {
     {418,0},{2322,1},{4227,2},{6132,3},{8037,0},{9941,1},
@@ -64,7 +104,8 @@ static const Note chart_jagger_medium[] = {
     {23275,0},{25179,1},{27084,2},{28989,3},{30894,0},{32798,1},
     {34703,2},{36608,3},{38513,0},{40418,1},{42322,2},{44227,3},
     {46132,0},{48037,1},{49941,2},{51846,3},{53751,0},{55656,1},
-    {57560,2},{59465,3}
+    {57560,2},{59465,3},{61370,0},{63275,1},{65179,2},{67084,3},
+    {68989,0},{70894,1}
 };
 static const Note chart_jagger_hard[] = {
     {418,0},{1370,1},{2322,2},{3275,3},{4227,0},{5179,1},
@@ -72,7 +113,14 @@ static const Note chart_jagger_hard[] = {
     {11846,0},{12798,1},{13751,2},{14703,3},{15656,0},{16608,1},
     {17560,2},{18513,3},{19465,0},{20418,1},{21370,2},{22322,3},
     {23275,0},{24227,1},{25179,2},{26132,3},{27084,0},{28037,1},
-    {28989,2},{29941,3}
+    {28989,2},{29941,3},{30894,0},{31846,1},{32798,2},{33751,3},
+    {34703,0},{35656,1},{36608,2},{37560,3},{38513,0},{39465,1},
+    {40418,2},{41370,3},{42322,0},{43275,1},{44227,2},{45179,3},
+    {46132,0},{47084,1},{48037,2},{48989,3},{49941,0},{50894,1},
+    {51846,2},{52798,3},{53751,0},{54703,1},{55656,2},{56608,3},
+    {57560,0},{58513,1},{59465,2},{60418,3},{61370,0},{62322,1},
+    {63275,2},{64227,3},{65179,0},{66132,1},{67084,2},{68037,3},
+    {68989,0},{69941,1},{70894,2},{71846,3}
 };
 
 typedef struct {
@@ -90,7 +138,7 @@ typedef struct {
 static const Song songs[] = {
     { "MOVES LIKE JAGGER", "0001.mp3",
       chart_jagger_easy, chart_jagger_medium, chart_jagger_hard,
-      20, 32, 32,
+      19, 38, 76,
       73000 },
 };
 static const uint8_t NUM_SONGS = 1;
@@ -119,6 +167,7 @@ static uint8_t PB0_WasPressed(void)
 
 void DrawArrow(Arrow arrow)
 {
+    uint32_t t0 = HAL_GetTick();
     switch (arrow)
     {
         case ARROW_UP:    ILI9341_DrawUpArrow(ILI9341_RED);      break;
@@ -127,6 +176,11 @@ void DrawArrow(Arrow arrow)
         case ARROW_RIGHT: ILI9341_DrawRightArrow(ILI9341_YELLOW);break;
         default: break;
     }
+    uint32_t draw_ms = HAL_GetTick() - t0;
+    uint32_t fps = (draw_ms > 0) ? (1000 / draw_ms) : 999;
+    char fps_buf[48];
+    sprintf(fps_buf, "DRAW=%lums FPS=%lu\r\n", draw_ms, fps);
+    uart_print(fps_buf);
 }
 
 static void DrawHUD(void)
@@ -218,9 +272,16 @@ static void PlaySong(uint8_t song_idx)
             uint16_t left  = FSR_read(FSR_LEFT);
             uint16_t right = FSR_read(FSR_RIGHT);
 
-            char dbg[100];
-            sprintf(dbg, "UP=%u DOWN=%u LEFT=%u RIGHT=%u\r\n", up, down, left, right);
-            uart_print(dbg);
+            static uint32_t last_print = 0;
+            uint8_t any_pressed = FSR_isPressed(FSR_UP) || FSR_isPressed(FSR_DOWN) ||
+                                  FSR_isPressed(FSR_LEFT) || FSR_isPressed(FSR_RIGHT);
+            if (any_pressed || (HAL_GetTick() - last_print >= 200))
+            {
+                char dbg[100];
+                sprintf(dbg, "UP=%u DOWN=%u LEFT=%u RIGHT=%u\r\n", up, down, left, right);
+                uart_print(dbg);
+                last_print = HAL_GetTick();
+            }
 
             Arrow pressed = ARROW_NONE;
             if      (FSR_isPressed(FSR_UP))    pressed = ARROW_UP;
@@ -279,7 +340,7 @@ static void PlaySong(uint8_t song_idx)
             DrawFeedback("        ", ILI9341_BLACK);
         }
 
-        if ((i + 1) % 10 == 0) Score_UpdateDifficulty();
+        if ((i + 1) % 20 == 0) Score_UpdateDifficulty();
     }
 
     DFPlayer_Stop();
@@ -287,6 +348,24 @@ static void PlaySong(uint8_t song_idx)
 song_done:
     sprintf(buf, "SONG DONE! SCORE=%lu\r\n", score);
     uart_print(buf);
+
+    /* Print final accuracy at end of song */
+    {
+        uint8_t count = acc50_full ? ACC50_SIZE : acc50_idx;
+        if (count > 0)
+        {
+            uint32_t hits = 0;
+            for (uint8_t j = 0; j < count; j++) hits += acc50_history[j];
+            uint32_t acc = (hits * 100) / count;
+            char abuf[64];
+            sprintf(abuf, "=== FINAL ACCURACY: %lu%% over %u presses ===\r\n", acc, count);
+            uart_print(abuf);
+            if (acc >= 95)
+                uart_print("SPEC 1d: PASS (>=95%%)\r\n");
+            else
+                uart_print("SPEC 1d: FAIL (<95%%)\r\n");
+        }
+    }
 
     /* ── End screen ─────────────────────────────────────────── */
     ILI9341_FillScreen(ILI9341_BLACK);
@@ -357,6 +436,8 @@ int main(void)
         score = combo = 0;
         history_idx = history_full = 0;
         memset(hit_history, 0, sizeof(hit_history));
+        acc50_idx = acc50_full = acc50_total_presses = 0;
+        memset(acc50_history, 0, sizeof(acc50_history));
 
         uart_print("Press PB0 to play again!\r\n");
         while (!PB0_WasPressed()) HAL_Delay(10);
@@ -457,16 +538,22 @@ void SystemClock_Config(void)
     RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
     RCC_OscInitStruct.MSIState = RCC_MSI_ON;
     RCC_OscInitStruct.MSICalibrationValue = 0;
-    RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
-    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+    RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6; /* 4MHz MSI for PLL input */
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
+    RCC_OscInitStruct.PLL.PLLM = 1;
+    RCC_OscInitStruct.PLL.PLLN = 40;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV7;
+    RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+    RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2; /* 4MHz * 40 / 2 = 80MHz */
     if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
     RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK|
                                   RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
     RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
     RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK) Error_Handler();
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK) Error_Handler();
 }
 
 void Error_Handler(void) { __disable_irq(); while (1) {} }
