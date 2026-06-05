@@ -15,9 +15,10 @@ static void SPI1_Config(void);
 static void LPUART1_Config(void);
 static void USART2_Config(void);
 
-typedef enum { EASY = 0, MEDIUM = 1, HARD = 2 } Difficulty;
-static const char *diff_names[] = { "EASY", "MEDIUM", "HARD" };
-static const uint32_t diff_window[] = { 1500, 1000, 700 };
+/* Expanded enum to treat Adaptive as its own distinct mode */
+typedef enum { EASY = 0, MEDIUM = 1, HARD = 2, ADAPTIVE = 3 } Difficulty;
+static const char *diff_names[] = { "EASY", "MEDIUM", "HARD", "ADAPTIVE" };
+static const uint32_t diff_window[] = { 1500, 1000, 700, 700 }; // Adaptive starts with Hard window (700ms)
 
 #define HISTORY_SIZE 20
 static uint8_t  hit_history[HISTORY_SIZE];
@@ -25,7 +26,8 @@ static uint8_t  history_idx      = 0;
 static uint8_t  history_full     = 0;
 static uint32_t score            = 0;
 static uint32_t combo            = 0;
-static Difficulty difficulty   = HARD;
+static Difficulty difficulty     = HARD; // Track actual playing difficulty
+static Difficulty chosen_mode    = HARD; // Track what the user selected in the menu
 
 /* 50-arrow accuracy tracking for Spec 1d */
 #define ACC50_SIZE 50
@@ -84,6 +86,9 @@ static void Score_RecordHit(uint8_t hit)
 
 static void Score_UpdateDifficulty(void)
 {
+    /* CRITICAL: Only run the adaptive scaling if ADAPTIVE mode was explicitly chosen */
+    if (chosen_mode != ADAPTIVE) return;
+
     uint8_t count = history_full ? HISTORY_SIZE : history_idx;
     if (count < 20) return; /* need at least 20 steps per spec */
     uint32_t hits = 0;
@@ -91,7 +96,7 @@ static void Score_UpdateDifficulty(void)
     uint32_t accuracy  = (hits * 100) / count;
     uint32_t miss_rate = 100 - accuracy;
     char buf[80];
-    sprintf(buf, "ACCURACY=%lu%% MISS=%lu%% COMBO=%lu DIFF=%s\r\n",
+    sprintf(buf, "[ADAPTIVE] ACCURACY=%lu%% MISS=%lu%% COMBO=%lu CURR_DIFF=%s\r\n",
             accuracy, miss_rate, combo, diff_names[difficulty]);
     HAL_UART_Transmit(&hlpuart1, (uint8_t*)buf, strlen(buf), HAL_MAX_DELAY);
 
@@ -102,7 +107,7 @@ static void Score_UpdateDifficulty(void)
     if (difficulty != old_diff)
     {
         char dbuf[48];
-        sprintf(dbuf, "DIFFICULTY -> %s\r\n", diff_names[difficulty]);
+        sprintf(dbuf, "ADAPTIVE SHIFT -> %s\r\n", diff_names[difficulty]);
         HAL_UART_Transmit(&hlpuart1, (uint8_t*)dbuf, strlen(dbuf), HAL_MAX_DELAY);
     }
 }
@@ -231,14 +236,19 @@ void DrawArrow(Arrow arrow)
 static void DrawHUD(void)
 {
     char buf[80];
-    sprintf(buf, "SCORE=%lu COMBO=%lu DIFF=%s\r\n",
-            score, combo, diff_names[difficulty]);
+    sprintf(buf, "SCORE=%lu COMBO=%lu MODE=%s (ACTUAL:%s)\r\n",
+            score, combo, diff_names[chosen_mode], diff_names[difficulty]);
     uart_print(buf);
 
     char sc[20], cb[20], df[20];
     sprintf(sc, "SC:%lu  ", score);
     sprintf(cb, "CB:%lu  ", combo);
-    sprintf(df, "%s  ", diff_names[difficulty]);
+
+    if (chosen_mode == ADAPTIVE)
+        sprintf(df, "ADP:%s  ", diff_names[difficulty]); // Show dynamic tier if adaptive
+    else
+        sprintf(df, "%s  ", diff_names[chosen_mode]);
+
     ILI9341_DrawString(2,  2,  sc, ILI9341_WHITE,  ILI9341_BLACK, 2);
     ILI9341_DrawString(2,  20, cb, ILI9341_YELLOW, ILI9341_BLACK, 2);
     ILI9341_DrawString(2,  38, df, ILI9341_CYAN,   ILI9341_BLACK, 2);
@@ -265,8 +275,8 @@ static void UI_RenderMainMenu(void)
 static void UI_RenderDifficultyMenu(void)
 {
     ILI9341_FillScreen(ILI9341_BLACK);
-    ILI9341_DrawString(10, 20, "SET START DIFFICULTY", ILI9341_CYAN, ILI9341_BLACK, 2);
-    for (int i = 0; i < 3; i++)
+    ILI9341_DrawString(10, 20, "SELECT MODE", ILI9341_CYAN, ILI9341_BLACK, 2);
+    for (int i = 0; i < 4; i++) // Formatted for 4 configuration items now
     {
         uint16_t color = (i == menu_index) ? ILI9341_YELLOW : ILI9341_WHITE;
         uint16_t bg    = (i == menu_index) ? ILI9341_BLUE   : ILI9341_BLACK;
@@ -283,7 +293,7 @@ static void UI_RenderReadyScreen(void)
     sprintf(details, "Track: %s", songs[current_song].name);
     ILI9341_DrawString(15, 110, details, ILI9341_WHITE, ILI9341_BLACK, 2);
 
-    sprintf(details, "Start: %s", diff_names[difficulty]);
+    sprintf(details, "Mode: %s", diff_names[chosen_mode]);
     ILI9341_DrawString(15, 140, details, ILI9341_WHITE, ILI9341_BLACK, 2);
 
     ILI9341_DrawString(10, 220, "PRESS PB0 TO START!", ILI9341_YELLOW, ILI9341_BLACK, 2);
@@ -293,8 +303,15 @@ static void PlaySong(uint8_t song_idx)
 {
     const Song *s = &songs[song_idx];
 
+    /* Force working state to HARD if adaptive mode is active */
+    if (chosen_mode == ADAPTIVE) {
+        difficulty = HARD;
+    } else {
+        difficulty = chosen_mode;
+    }
+
     char buf[64];
-    sprintf(buf, "SONG: %s | DIFF: %s\r\n", s->name, diff_names[difficulty]);
+    sprintf(buf, "PLAYING: %s | MODE: %s\r\n", s->name, diff_names[chosen_mode]);
     uart_print(buf);
 
     DFPlayer_Play(s->filename);
@@ -317,7 +334,7 @@ static void PlaySong(uint8_t song_idx)
             goto song_done;
         }
 
-        /* Get current chart and index based on difficulty */
+        /* Get current chart and index based on runtime difficulty variable */
         const Note *chart;
         uint8_t    *idx_ptr;
         uint8_t     chart_count;
@@ -328,7 +345,7 @@ static void PlaySong(uint8_t song_idx)
         /* If chart exhausted, just wait for song to end */
         if (*idx_ptr >= chart_count) { HAL_Delay(10); continue; }
 
-        /* If difficulty just changed, skip past notes already played in new chart */
+        /* Handle dynamic mid-song switching (only occurs in Adaptive mode) */
         if (difficulty != last_diff)
         {
             uint32_t now_ms = HAL_GetTick() - song_start;
@@ -347,7 +364,6 @@ static void PlaySong(uint8_t song_idx)
             if ((HAL_GetTick() - song_start) >= s->duration_ms)
             { DFPlayer_Stop(); goto song_done; }
 
-            /* Difficulty changed while waiting */
             if (difficulty != last_diff) break;
 
             if (PB0_WasPressed())
@@ -365,10 +381,9 @@ static void PlaySong(uint8_t song_idx)
             HAL_Delay(5);
         }
 
-        /* If difficulty changed during wait, restart loop */
         if (difficulty != last_diff) continue;
 
-        /* Re-fetch chart in case it changed */
+        // Re-fetch mapping configuration updates safely
         if (difficulty == EASY)        { chart = s->easy;   idx_ptr = &easy_idx;   chart_count = s->easy_count; }
         else if (difficulty == MEDIUM) { chart = s->medium; idx_ptr = &medium_idx; chart_count = s->medium_count; }
         else                           { chart = s->hard;   idx_ptr = &hard_idx;   chart_count = s->hard_count; }
@@ -459,6 +474,7 @@ static void PlaySong(uint8_t song_idx)
             DrawFeedback("        ", ILI9341_BLACK);
         }
 
+        /* Check the evaluation condition gate every 20 notes */
         if (total_notes % 20 == 0) Score_UpdateDifficulty();
     }
 
@@ -468,7 +484,7 @@ song_done:
     sprintf(buf, "SONG DONE! SCORE=%lu\r\n", score);
     uart_print(buf);
 
-    /* Print final accuracy at end of song */
+    /* Final evaluation reporting metrics */
     {
         uint8_t count = acc50_full ? ACC50_SIZE : acc50_idx;
         if (count > 0)
@@ -505,7 +521,7 @@ song_done:
     ILI9341_DrawString(20, 155, end_cb, ILI9341_YELLOW, ILI9341_BLACK, 2);
 
     char end_df[30];
-    sprintf(end_df, "DIFF: %s", diff_names[difficulty]);
+    sprintf(end_df, "MODE: %s", diff_names[chosen_mode]);
     ILI9341_DrawString(20, 180, end_df, ILI9341_CYAN, ILI9341_BLACK, 2);
 
     HAL_Delay(4000);
@@ -528,7 +544,7 @@ int main(void)
     FSR_Calibrate();
     DFPlayer_Init(&huart2, &hlpuart1);
 
-    /* TEMP TEST: pulse PLAY pin 3 times on boot */
+    /* Boot flash validation sequence */
     for (int i = 0; i < 3; i++)
     {
         GPIOB->BRR  = GPIO_PIN_1;
@@ -538,10 +554,8 @@ int main(void)
     }
 
     srand(HAL_GetTick());
+    uart_print("\r\n=== GAME ENGINE CONFIGURED ===\r\n");
 
-    uart_print("\r\n=== GAME ENGINE READY ===\r\n");
-
-    // Jump to Menu Engine
     current_state = STATE_MAIN_MENU;
     menu_index = 0;
     UI_RenderMainMenu();
@@ -558,14 +572,14 @@ int main(void)
                 }
                 if (Select_WasPressed())
                 {
-                    if (menu_index == 0) // Track selection
+                    if (menu_index == 0) // Track confirmed
                     {
                         current_song = 0;
-                        menu_index = (int8_t)difficulty; // Initial highlight map to dynamic diff
+                        menu_index = 0; // Highlight default option 'EASY'
                         current_state = STATE_DIFFICULTY_MENU;
                         UI_RenderDifficultyMenu();
                     }
-                    else if (menu_index == 1) // Recalibration
+                    else if (menu_index == 1) // Force recalibration process
                     {
                         uart_print("RE-CALIBRATING FSR SENSORS...\r\n");
                         FSR_Calibrate();
@@ -577,12 +591,12 @@ int main(void)
             case STATE_DIFFICULTY_MENU:
                 if (Scroll_WasPressed())
                 {
-                    menu_index = (menu_index + 1) % 3;
+                    menu_index = (menu_index + 1) % 4; // Cycles cleanly through all 4 structural modes
                     UI_RenderDifficultyMenu();
                 }
                 if (Select_WasPressed())
                 {
-                    difficulty = (Difficulty)menu_index;
+                    chosen_mode = (Difficulty)menu_index; // Captures locked choice or adaptive selection
                     current_state = STATE_READY_TO_PLAY;
                     UI_RenderReadyScreen();
                 }
@@ -593,7 +607,7 @@ int main(void)
                 {
                     current_state = STATE_PLAYING;
                 }
-                if (Select_WasPressed()) // Fallback shortcut back to top menu
+                if (Select_WasPressed())
                 {
                     menu_index = 0;
                     current_state = STATE_MAIN_MENU;
@@ -604,14 +618,14 @@ int main(void)
             case STATE_PLAYING:
                 PlaySong(current_song);
 
-                /* Reset runtime score matrices completely */
+                /* Flush volatility memory space entirely */
                 score = combo = 0;
                 history_idx = history_full = 0;
                 memset(hit_history, 0, sizeof(hit_history));
                 acc50_idx = acc50_full = acc50_total_presses = 0;
                 memset(acc50_history, 0, sizeof(acc50_history));
 
-                /* Automatically return seamlessly to top option flow */
+                // Loop-back navigation structure
                 menu_index = 0;
                 current_state = STATE_MAIN_MENU;
                 UI_RenderMainMenu();
@@ -635,12 +649,10 @@ static void GPIO_Config(void)
     GPIOA->AFR[0]  &= ~((0xFU << GPIO_AFRL_AFSEL2_Pos) | (0xFU << GPIO_AFRL_AFSEL3_Pos));
     GPIOA->AFR[0]  |=  ((7U << GPIO_AFRL_AFSEL2_Pos) | (7U << GPIO_AFRL_AFSEL3_Pos));
 
-    // PB0 Configuration
     GPIOB->MODER &= ~(3U << (0*2));
     GPIOB->PUPDR &= ~(3U << (0*2));
     GPIOB->PUPDR |=  (1U << (0*2));
 
-    // SPI GPIO Configs (PA5, PA7)
     GPIOA->MODER &= ~((3U << (5*2)) | (3U << (7*2)));
     GPIOA->MODER |=  ((2U << (5*2)) | (2U << (7*2)));
     GPIOA->OTYPER  &= ~(GPIO_PIN_5 | GPIO_PIN_7);
@@ -649,7 +661,6 @@ static void GPIO_Config(void)
     GPIOA->AFR[0]  &= ~((0xFU << GPIO_AFRL_AFSEL5_Pos) | (0xFU << GPIO_AFRL_AFSEL7_Pos));
     GPIOA->AFR[0]  |=  ((5U << GPIO_AFRL_AFSEL5_Pos) | (5U << GPIO_AFRL_AFSEL7_Pos));
 
-    // Display Control Pins (PC3, PC4, PC8)
     GPIOC->MODER &= ~((3U << (3*2)) | (3U << (4*2)) | (3U << (8*2)));
     GPIOC->MODER |=  ((1U << (3*2)) | (1U << (4*2)) | (1U << (8*2)));
     GPIOC->OTYPER  &= ~(GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_8);
@@ -659,10 +670,10 @@ static void GPIO_Config(void)
     GPIOC->BSRR = GPIO_PIN_8;
     GPIOC->BRR  = GPIO_PIN_3;
 
-    /* --- NEW MENU BUTTONS: PC10 (Scroll) and PC11 (Select) Configuration --- */
-    GPIOC->MODER  &= ~((3U << (10*2)) | (3U << (11*2))); // Mode: Input
-    GPIOC->PUPDR  &= ~((3U << (10*2)) | (3U << (11*2))); // Clear Pull configuration
-    GPIOC->PUPDR  |=  ((1U << (10*2)) | (1U << (11*2))); // Set Pull-up
+    /* Menu Buttons: PC10 (Scroll) and PC11 (Select) */
+    GPIOC->MODER  &= ~((3U << (10*2)) | (3U << (11*2)));
+    GPIOC->PUPDR  &= ~((3U << (10*2)) | (3U << (11*2)));
+    GPIOC->PUPDR  |=  ((1U << (10*2)) | (1U << (11*2)));
 }
 
 static void SPI1_Config(void)
