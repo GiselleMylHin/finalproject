@@ -134,6 +134,22 @@ static void DrawHUD(void)
     sprintf(buf, "SCORE=%lu COMBO=%lu DIFF=%s\r\n",
             score, combo, diff_names[difficulty]);
     uart_print(buf);
+
+    /* Draw score and combo in top-left corner of LCD */
+    char score_buf[20];
+    char combo_buf[20];
+    sprintf(score_buf, "SC:%lu ", score);
+    sprintf(combo_buf, "CB:%lu ", combo);
+    ILI9341_DrawString(2, 2,  score_buf, ILI9341_WHITE, ILI9341_BLACK, 2);
+    ILI9341_DrawString(2, 20, combo_buf, ILI9341_WHITE, ILI9341_BLACK, 2);
+}
+
+static void DrawFeedback(const char *text, uint16_t color)
+{
+    /* Clear feedback area bottom-left corner */
+    ILI9341_FillRect(2, 280, 150, 30, ILI9341_BLACK);
+    /* Draw feedback text */
+    ILI9341_DrawString(2, 285, text, color, ILI9341_BLACK, 2);
 }
 
 static void PlaySong(uint8_t song_idx)
@@ -215,13 +231,13 @@ static void PlaySong(uint8_t song_idx)
                 if (pressed == target)
                 {
                     uart_print("HIT!\r\n");
-                    ILI9341_FillScreen(ILI9341_GREEN);
+                    DrawFeedback("PERFECT", ILI9341_GREEN);
                     Score_RecordHit(1);
                 }
                 else
                 {
                     uart_print("WRONG\r\n");
-                    ILI9341_FillScreen(ILI9341_RED);
+                    DrawFeedback("MISS", ILI9341_RED);
                     Score_RecordHit(0);
                 }
 
@@ -232,8 +248,8 @@ static void PlaySong(uint8_t song_idx)
                 { HAL_Delay(10); }
 
                 judged = 1;
-                HAL_Delay(100);
-                ILI9341_FillScreen(ILI9341_BLACK);
+                HAL_Delay(300);
+                DrawFeedback("       ", ILI9341_BLACK);
                 break;
             }
             HAL_Delay(5);
@@ -243,9 +259,9 @@ static void PlaySong(uint8_t song_idx)
         {
             uart_print("MISS\r\n");
             Score_RecordHit(0);
-            ILI9341_FillScreen(ILI9341_RED);
-            HAL_Delay(150);
-            ILI9341_FillScreen(ILI9341_BLACK);
+            DrawFeedback("MISS", ILI9341_RED);
+            HAL_Delay(300);
+            DrawFeedback("       ", ILI9341_BLACK);
         }
 
         if ((i + 1) % 10 == 0) Score_UpdateDifficulty();
@@ -274,15 +290,6 @@ int main(void)
 
     FSR_init();
     DFPlayer_Init(&huart2, &hlpuart1);
-
-    /* TEMP TEST: pulse PLAY pin 3 times on boot to verify GPIO works */
-    for (int i = 0; i < 3; i++)
-    {
-        GPIOB->BRR  = GPIO_PIN_1;
-        HAL_Delay(200);
-        GPIOB->BSRR = GPIO_PIN_1;
-        HAL_Delay(500);
-    }
 
     srand(HAL_GetTick());
 
