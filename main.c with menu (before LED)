@@ -14,6 +14,7 @@ static void GPIO_Config(void);
 static void SPI1_Config(void);
 static void LPUART1_Config(void);
 static void USART2_Config(void);
+void uart_print(char *msg);
 
 /* Expanded enum to treat Adaptive as its own distinct mode */
 typedef enum { EASY = 0, MEDIUM = 1, HARD = 2, ADAPTIVE = 3 } Difficulty;
@@ -47,10 +48,10 @@ typedef enum {
 static GameState current_state = STATE_MAIN_MENU;
 static int8_t menu_index = 0;
 
-#define MENU_ITEMS_MAIN 2
+/* Main menu streamlined down to 1 option */
+#define MENU_ITEMS_MAIN 1
 static const char *main_menu_strings[MENU_ITEMS_MAIN] = {
-    "1. MOVES LIKE JAGGER",
-    "2. CALIBRATE FSR"
+    "1. MOVES LIKE JAGGER"
 };
 
 static void Score_RecordHit(uint8_t hit)
@@ -163,7 +164,6 @@ static const Song songs[] = {
       19, 38, 76,
       73000 },
 };
-static const uint8_t NUM_SONGS = 1;
 static uint8_t current_song = 0;
 
 typedef enum { ARROW_UP=0, ARROW_DOWN=1, ARROW_LEFT=2, ARROW_RIGHT=3, ARROW_NONE=99 } Arrow;
@@ -245,7 +245,7 @@ static void DrawHUD(void)
     sprintf(cb, "CB:%lu  ", combo);
 
     if (chosen_mode == ADAPTIVE)
-        sprintf(df, "ADP:%s  ", diff_names[difficulty]); // Show dynamic tier if adaptive
+        sprintf(df, "ADP:%s  ", diff_names[difficulty]);
     else
         sprintf(df, "%s  ", diff_names[chosen_mode]);
 
@@ -276,7 +276,7 @@ static void UI_RenderDifficultyMenu(void)
 {
     ILI9341_FillScreen(ILI9341_BLACK);
     ILI9341_DrawString(10, 20, "SELECT MODE", ILI9341_CYAN, ILI9341_BLACK, 2);
-    for (int i = 0; i < 4; i++) // Formatted for 4 configuration items now
+    for (int i = 0; i < 4; i++)
     {
         uint16_t color = (i == menu_index) ? ILI9341_YELLOW : ILI9341_WHITE;
         uint16_t bg    = (i == menu_index) ? ILI9341_BLUE   : ILI9341_BLACK;
@@ -541,6 +541,7 @@ int main(void)
     ILI9341_FillScreen(ILI9341_BLACK);
 
     FSR_init();
+    /* Internal analog baseline calibration kept for initialization reliability */
     FSR_Calibrate();
     DFPlayer_Init(&huart2, &hlpuart1);
 
@@ -572,19 +573,11 @@ int main(void)
                 }
                 if (Select_WasPressed())
                 {
-                    if (menu_index == 0) // Track confirmed
-                    {
-                        current_song = 0;
-                        menu_index = 0; // Highlight default option 'EASY'
-                        current_state = STATE_DIFFICULTY_MENU;
-                        UI_RenderDifficultyMenu();
-                    }
-                    else if (menu_index == 1) // Force recalibration process
-                    {
-                        uart_print("RE-CALIBRATING FSR SENSORS...\r\n");
-                        FSR_Calibrate();
-                        UI_RenderMainMenu();
-                    }
+                    /* Jump straight to difficulty picker on select */
+                    current_song = 0;
+                    menu_index = 0; // Highlight default option 'EASY'
+                    current_state = STATE_DIFFICULTY_MENU;
+                    UI_RenderDifficultyMenu();
                 }
                 break;
 
