@@ -17,7 +17,7 @@ static void USART2_Config(void);
 
 typedef enum { EASY = 0, MEDIUM = 1, HARD = 2 } Difficulty;
 static const char *diff_names[] = { "EASY", "MEDIUM", "HARD" };
-static const uint32_t diff_window[] = { 1500, 1000, 700 };
+static const uint32_t diff_window[] = { 400, 400, 400 };
 
 #define HISTORY_SIZE 20
 static uint8_t  hit_history[HISTORY_SIZE];
@@ -135,6 +135,20 @@ static void DrawHUD(void)
     sprintf(buf, "SCORE=%lu COMBO=%lu DIFF=%s\r\n",
             score, combo, diff_names[difficulty]);
     uart_print(buf);
+
+    char sc[20], cb[20], df[20];
+    sprintf(sc, "SC:%lu  ", score);
+    sprintf(cb, "CB:%lu  ", combo);
+    sprintf(df, "%s  ", diff_names[difficulty]);
+    ILI9341_DrawString(2,  2,  sc, ILI9341_WHITE,  ILI9341_BLACK, 2);
+    ILI9341_DrawString(2,  20, cb, ILI9341_YELLOW, ILI9341_BLACK, 2);
+    ILI9341_DrawString(2,  38, df, ILI9341_CYAN,   ILI9341_BLACK, 2);
+}
+
+static void DrawFeedback(const char *text, uint16_t color)
+{
+    ILI9341_FillRect(2, 278, 160, 30, ILI9341_BLACK);
+    ILI9341_DrawString(2, 283, text, color, ILI9341_BLACK, 2);
 }
 
 static void PlaySong(uint8_t song_idx)
@@ -209,35 +223,48 @@ static void PlaySong(uint8_t song_idx)
             uart_print(dbg);
 
             Arrow pressed = ARROW_NONE;
-            if      (up    > FSR_THRESHOLD) pressed = ARROW_UP;
-            else if (down  > FSR_THRESHOLD) pressed = ARROW_DOWN;
-            else if (left  > FSR_THRESHOLD) pressed = ARROW_LEFT;
-            else if (right > FSR_THRESHOLD) pressed = ARROW_RIGHT;
+            if      (FSR_isPressed(FSR_UP))    pressed = ARROW_UP;
+            else if (FSR_isPressed(FSR_DOWN))  pressed = ARROW_DOWN;
+            else if (FSR_isPressed(FSR_LEFT))  pressed = ARROW_LEFT;
+            else if (FSR_isPressed(FSR_RIGHT)) pressed = ARROW_RIGHT;
 
             if (pressed != ARROW_NONE)
             {
                 if (pressed == target)
                 {
-                    uart_print("HIT!\r\n");
-                    ILI9341_FillScreen(ILI9341_GREEN);
-                    Score_RecordHit(1);
+                    /* Press in first 40% of window = PERFECT (on beat)
+                     * Press in last 60% of window  = GOOD (late)        */
+                    uint32_t elapsed = HAL_GetTick() - win_start;
+                    if (elapsed <= (window * 4 / 10))
+                    {
+                        uart_print("PERFECT\r\n");
+                        DrawFeedback("PERFECT", ILI9341_GREEN);
+                        Score_RecordHit(1);
+                        score += 5;
+                    }
+                    else
+                    {
+                        uart_print("GOOD\r\n");
+                        DrawFeedback("GOOD", ILI9341_YELLOW);
+                        Score_RecordHit(1);
+                    }
                 }
                 else
                 {
                     uart_print("WRONG\r\n");
-                    ILI9341_FillScreen(ILI9341_RED);
+                    DrawFeedback("MISS", ILI9341_RED);
                     Score_RecordHit(0);
                 }
 
-                while (FSR_read(FSR_UP)    > FSR_THRESHOLD ||
-                       FSR_read(FSR_DOWN)  > FSR_THRESHOLD ||
-                       FSR_read(FSR_LEFT)  > FSR_THRESHOLD ||
-                       FSR_read(FSR_RIGHT) > FSR_THRESHOLD)
+                while (FSR_isPressed(FSR_UP)    ||
+                       FSR_isPressed(FSR_DOWN)  ||
+                       FSR_isPressed(FSR_LEFT)  ||
+                       FSR_isPressed(FSR_RIGHT))
                 { HAL_Delay(10); }
 
                 judged = 1;
-                HAL_Delay(100);
-                ILI9341_FillScreen(ILI9341_BLACK);
+                HAL_Delay(300);
+                DrawFeedback("        ", ILI9341_BLACK);
                 break;
             }
             HAL_Delay(5);
@@ -247,9 +274,9 @@ static void PlaySong(uint8_t song_idx)
         {
             uart_print("MISS\r\n");
             Score_RecordHit(0);
-            ILI9341_FillScreen(ILI9341_RED);
-            HAL_Delay(150);
-            ILI9341_FillScreen(ILI9341_BLACK);
+            DrawFeedback("MISS", ILI9341_RED);
+            HAL_Delay(300);
+            DrawFeedback("        ", ILI9341_BLACK);
         }
 
         if ((i + 1) % 10 == 0) Score_UpdateDifficulty();
@@ -260,8 +287,35 @@ static void PlaySong(uint8_t song_idx)
 song_done:
     sprintf(buf, "SONG DONE! SCORE=%lu\r\n", score);
     uart_print(buf);
+
+    /* ── End screen ─────────────────────────────────────────── */
     ILI9341_FillScreen(ILI9341_BLACK);
-    HAL_Delay(2000);
+
+    /* Pick message based on score */
+    const char *msg;
+    if      (score >= 300) msg = "AMAZING!";
+    else if (score >= 200) msg = "GREAT JOB!";
+    else if (score >= 100) msg = "GOOD JOB!";
+    else if (score >= 50)  msg = "KEEP IT UP";
+    else                   msg = "PRACTICE!";
+
+    /* Draw message centered */
+    ILI9341_DrawString(20, 60,  msg,          ILI9341_YELLOW, ILI9341_BLACK, 3);
+
+    /* Draw score */
+    char end_sc[30], end_cb[30];
+    sprintf(end_sc, "SCORE: %lu", score);
+    sprintf(end_cb, "COMBO: %lu", combo);
+    ILI9341_DrawString(20, 130, end_sc, ILI9341_WHITE,  ILI9341_BLACK, 2);
+    ILI9341_DrawString(20, 155, end_cb, ILI9341_YELLOW, ILI9341_BLACK, 2);
+
+    /* Draw difficulty */
+    char end_df[30];
+    sprintf(end_df, "DIFF: %s", diff_names[difficulty]);
+    ILI9341_DrawString(20, 180, end_df, ILI9341_CYAN, ILI9341_BLACK, 2);
+
+    HAL_Delay(4000);
+    ILI9341_FillScreen(ILI9341_BLACK);
 }
 
 int main(void)
@@ -277,6 +331,7 @@ int main(void)
     ILI9341_FillScreen(ILI9341_BLACK);
 
     FSR_init();
+    FSR_Calibrate();
     DFPlayer_Init(&huart2, &hlpuart1);
 
     /* TEMP TEST: pulse PLAY pin 3 times on boot to verify GPIO works */
