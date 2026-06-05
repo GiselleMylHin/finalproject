@@ -4,20 +4,24 @@
 
 /*
  * Pin / Channel map:
- *   PA0 = ADC1_CH5  = FSR_UP    (verified working)
- *   PA1 = ADC1_CH6  = FSR_DOWN  (verified working)
- *   PC0 = ADC1_CH1  = FSR_LEFT  (moved from PA4)
- *   PC1 = ADC1_CH2  = FSR_RIGHT (moved from PA6)
+ *   PA0 = ADC1_CH5  = FSR_UP
+ *   PA1 = ADC1_CH6  = FSR_DOWN
+ *   PC0 = ADC1_CH1  = FSR_LEFT
+ *   PC1 = ADC1_CH2  = FSR_RIGHT
  */
+
+#define FSR_PRESS_OFFSET 300  /* ADC counts above baseline = pressed */
+
+static uint16_t fsr_baseline[4] = {0, 0, 0, 0};
 
 static uint32_t get_channel(FSR_Channel ch)
 {
     switch (ch)
     {
-        case FSR_UP:    return 5;   /* PA0 */
-        case FSR_DOWN:  return 6;   /* PA1 */
-        case FSR_LEFT:  return 1;   /* PC0 */
-        case FSR_RIGHT: return 2;   /* PC1 */
+        case FSR_UP:    return 5;
+        case FSR_DOWN:  return 6;
+        case FSR_LEFT:  return 1;
+        case FSR_RIGHT: return 2;
         default:        return 5;
     }
 }
@@ -92,7 +96,22 @@ uint16_t FSR_read(FSR_Channel ch)
     return (uint16_t)(ADC1->DR & 0x0FFF);
 }
 
+void FSR_Calibrate(void)
+{
+    /* Average 10 readings at rest for each FSR to set baseline */
+    for (int ch = 0; ch < 4; ch++)
+    {
+        uint32_t sum = 0;
+        for (int j = 0; j < 10; j++)
+        {
+            sum += FSR_read((FSR_Channel)ch);
+            HAL_Delay(10);
+        }
+        fsr_baseline[ch] = (uint16_t)(sum / 10);
+    }
+}
+
 uint8_t FSR_isPressed(FSR_Channel ch)
 {
-    return FSR_read(ch) > FSR_THRESHOLD;
+    return FSR_read(ch) > (fsr_baseline[ch] + FSR_PRESS_OFFSET);
 }
