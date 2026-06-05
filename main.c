@@ -208,51 +208,91 @@ static void DrawFeedback(const char *text, uint16_t color)
 static void PlaySong(uint8_t song_idx)
 {
     const Song *s = &songs[song_idx];
-    const Note *chart;
-
-    if      (difficulty == EASY)   chart = s->easy;
-    else if (difficulty == MEDIUM) chart = s->medium;
-    else                           chart = s->hard;
 
     char buf[64];
     sprintf(buf, "SONG: %s | DIFF: %s\r\n", s->name, diff_names[difficulty]);
     uart_print(buf);
 
     DFPlayer_Play(s->filename);
-    uint32_t song_start = HAL_GetTick();
-    uint32_t window     = diff_window[difficulty];
+    uint32_t song_start  = HAL_GetTick();
+    uint8_t  easy_idx    = 0;
+    uint8_t  medium_idx  = 0;
+    uint8_t  hard_idx    = 0;
+    uint8_t  total_notes = 0;
+    Difficulty last_diff = difficulty;
 
-    uint8_t note_count = (difficulty == EASY) ? s->easy_count :
-                         (difficulty == MEDIUM) ? s->medium_count : s->hard_count;
-
-    for (uint8_t i = 0; i < note_count; i++)
+    while (1)
     {
-        uint32_t note_time = song_start + chart[i].time_ms;
+        /* Check song end */
+        if ((HAL_GetTick() - song_start) >= s->duration_ms)
+        {
+            uart_print("SONG TIME LIMIT\r\n");
+            DFPlayer_Stop();
+            goto song_done;
+        }
 
+        /* Get current chart and index based on difficulty */
+        const Note *chart;
+        uint8_t    *idx_ptr;
+        uint8_t     chart_count;
+        if (difficulty == EASY)        { chart = s->easy;   idx_ptr = &easy_idx;   chart_count = s->easy_count; }
+        else if (difficulty == MEDIUM) { chart = s->medium; idx_ptr = &medium_idx; chart_count = s->medium_count; }
+        else                           { chart = s->hard;   idx_ptr = &hard_idx;   chart_count = s->hard_count; }
+
+        /* If chart exhausted, just wait for song to end */
+        if (*idx_ptr >= chart_count) { HAL_Delay(10); continue; }
+
+        /* If difficulty just changed, skip past notes already played in new chart */
+        if (difficulty != last_diff)
+        {
+            uint32_t now_ms = HAL_GetTick() - song_start;
+            while (*idx_ptr < chart_count && chart[*idx_ptr].time_ms <= now_ms)
+                (*idx_ptr)++;
+            last_diff = difficulty;
+            if (*idx_ptr >= chart_count) { HAL_Delay(10); continue; }
+        }
+
+        uint32_t window    = diff_window[difficulty];
+        uint32_t note_time = song_start + chart[*idx_ptr].time_ms;
+
+        /* Wait for note time */
         while (HAL_GetTick() < note_time)
         {
             if ((HAL_GetTick() - song_start) >= s->duration_ms)
-            {
-                uart_print("SONG TIME LIMIT\r\n");
-                DFPlayer_Stop();
-                goto song_done;
-            }
+            { DFPlayer_Stop(); goto song_done; }
+
+            /* Difficulty changed while waiting */
+            if (difficulty != last_diff) break;
+
             if (PB0_WasPressed())
             {
                 uart_print("PAUSED\r\n");
                 DFPlayer_Pause();
-                uint32_t pause_start = HAL_GetTick();
+                uint32_t ps = HAL_GetTick();
                 while (!PB0_WasPressed()) HAL_Delay(10);
-                uint32_t pause_duration = HAL_GetTick() - pause_start;
+                uint32_t pd = HAL_GetTick() - ps;
                 uart_print("RESUMED\r\n");
                 DFPlayer_Resume();
-                song_start += pause_duration;
-                note_time  += pause_duration;
+                song_start += pd;
+                note_time  += pd;
             }
             HAL_Delay(5);
         }
 
-        Arrow target = (Arrow)chart[i].direction;
+        /* If difficulty changed during wait, restart loop */
+        if (difficulty != last_diff) continue;
+
+        /* Re-fetch chart in case it changed */
+        if (difficulty == EASY)        { chart = s->easy;   idx_ptr = &easy_idx;   chart_count = s->easy_count; }
+        else if (difficulty == MEDIUM) { chart = s->medium; idx_ptr = &medium_idx; chart_count = s->medium_count; }
+        else                           { chart = s->hard;   idx_ptr = &hard_idx;   chart_count = s->hard_count; }
+        if (*idx_ptr >= chart_count) continue;
+
+        window = diff_window[difficulty];
+        Arrow target = (Arrow)chart[*idx_ptr].direction;
+        (*idx_ptr)++;
+        total_notes++;
+
         DrawArrow(target);
         DrawHUD();
 
@@ -262,10 +302,7 @@ static void PlaySong(uint8_t song_idx)
         while ((HAL_GetTick() - win_start) < window)
         {
             if ((HAL_GetTick() - song_start) >= s->duration_ms)
-            {
-                DFPlayer_Stop();
-                goto song_done;
-            }
+            { DFPlayer_Stop(); goto song_done; }
 
             uint16_t up    = FSR_read(FSR_UP);
             uint16_t down  = FSR_read(FSR_DOWN);
@@ -293,8 +330,6 @@ static void PlaySong(uint8_t song_idx)
             {
                 if (pressed == target)
                 {
-                    /* Press in first 40% of window = PERFECT (on beat)
-                     * Press in last 60% of window  = GOOD (late)        */
                     uint32_t elapsed = HAL_GetTick() - win_start;
                     if (elapsed <= (window * 4 / 10))
                     {
@@ -317,10 +352,8 @@ static void PlaySong(uint8_t song_idx)
                     Score_RecordHit(0);
                 }
 
-                while (FSR_isPressed(FSR_UP)    ||
-                       FSR_isPressed(FSR_DOWN)  ||
-                       FSR_isPressed(FSR_LEFT)  ||
-                       FSR_isPressed(FSR_RIGHT))
+                while (FSR_isPressed(FSR_UP)   || FSR_isPressed(FSR_DOWN) ||
+                       FSR_isPressed(FSR_LEFT) || FSR_isPressed(FSR_RIGHT))
                 { HAL_Delay(10); }
 
                 judged = 1;
@@ -340,7 +373,7 @@ static void PlaySong(uint8_t song_idx)
             DrawFeedback("        ", ILI9341_BLACK);
         }
 
-        if ((i + 1) % 20 == 0) Score_UpdateDifficulty();
+        if (total_notes % 20 == 0) Score_UpdateDifficulty();
     }
 
     DFPlayer_Stop();
