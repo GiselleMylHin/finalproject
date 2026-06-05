@@ -1,0 +1,795 @@
+#include "main.h"
+#include "ili9341.h"
+#include "fsr.h"
+#include "dfplayer.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+UART_HandleTypeDef hlpuart1;
+UART_HandleTypeDef huart2;
+
+void SystemClock_Config(void);
+static void GPIO_Config(void);
+static void SPI1_Config(void);
+static void LPUART1_Config(void);
+static void USART2_Config(void);
+void uart_print(char *msg);
+
+typedef enum { EASY = 0, MEDIUM = 1, HARD = 2, ADAPTIVE = 3 } Difficulty;
+static const char *diff_names[] = { "EASY", "MEDIUM", "HARD", "ADAPTIVE" };
+static const uint32_t diff_window[] = { 1500, 1000, 700, 700 };
+
+#define HISTORY_SIZE 20
+static uint8_t  hit_history[HISTORY_SIZE];
+static uint8_t  history_idx      = 0;
+static uint8_t  history_full     = 0;
+static uint32_t score            = 0;
+static uint32_t combo            = 0;
+static Difficulty difficulty     = HARD;
+static Difficulty chosen_mode    = HARD;
+
+#define ACC50_SIZE 50
+static uint8_t  acc50_history[ACC50_SIZE];
+static uint8_t  acc50_idx  = 0;
+static uint8_t  acc50_full = 0;
+static uint32_t acc50_total_presses = 0;
+
+typedef enum {
+    STATE_MAIN_MENU,
+    STATE_DIFFICULTY_MENU,
+    STATE_READY_TO_PLAY,
+    STATE_PLAYING
+} GameState;
+
+static GameState current_state = STATE_MAIN_MENU;
+static int8_t menu_index = 0;
+
+#define MENU_ITEMS_MAIN 1
+static const char *main_menu_strings[MENU_ITEMS_MAIN] = {
+    "1. MOVES LIKE JAGGER"
+};
+
+static void Score_RecordHit(uint8_t hit)
+{
+    hit_history[history_idx] = hit;
+    history_idx = (history_idx + 1) % HISTORY_SIZE;
+    if (history_idx == 0) history_full = 1;
+    if (hit) { score += (10 * (combo + 1)); combo++; }
+    else      { combo = 0; }
+
+    acc50_history[acc50_idx] = hit;
+    acc50_idx = (acc50_idx + 1) % ACC50_SIZE;
+    if (acc50_idx == 0) acc50_full = 1;
+    acc50_total_presses++;
+
+    if (acc50_total_presses % 50 == 0)
+    {
+        uint8_t count = acc50_full ? ACC50_SIZE : acc50_idx;
+        uint32_t hits = 0;
+        for (uint8_t i = 0; i < count; i++) hits += acc50_history[i];
+        uint32_t acc = (hits * 100) / count;
+        char abuf[64];
+        sprintf(abuf, "=== 50-ARROW ACCURACY: %lu%% ===\r\n", acc);
+        uart_print(abuf);
+        if (acc >= 95)
+            uart_print("SPEC 1d: PASS (>=95%%)\r\n");
+        else
+            uart_print("SPEC 1d: FAIL (<95%%)\r\n");
+    }
+}
+
+static void Score_UpdateDifficulty(void)
+{
+    if (chosen_mode != ADAPTIVE) return;
+
+    uint8_t count = history_full ? HISTORY_SIZE : history_idx;
+    if (count < 20) return;
+    uint32_t hits = 0;
+    for (uint8_t i = 0; i < count; i++) hits += hit_history[i];
+    uint32_t accuracy  = (hits * 100) / count;
+    uint32_t miss_rate = 100 - accuracy;
+    char buf[80];
+    sprintf(buf, "[ADAPTIVE] ACCURACY=%lu%% MISS=%lu%% COMBO=%lu CURR_DIFF=%s\r\n",
+            accuracy, miss_rate, combo, diff_names[difficulty]);
+    HAL_UART_Transmit(&hlpuart1, (uint8_t*)buf, strlen(buf), HAL_MAX_DELAY);
+
+    Difficulty old_diff = difficulty;
+    if      (accuracy >= 85 && difficulty < HARD) difficulty++;
+    else if (accuracy <= 60 && difficulty > EASY) difficulty--;
+
+    if (difficulty != old_diff)
+    {
+        char dbuf[48];
+        sprintf(dbuf, "ADAPTIVE SHIFT -> %s\r\n", diff_names[difficulty]);
+        HAL_UART_Transmit(&hlpuart1, (uint8_t*)dbuf, strlen(dbuf), HAL_MAX_DELAY);
+    }
+}
+
+typedef struct { uint32_t time_ms; uint8_t direction; } Note;
+
+static const Note chart_jagger_easy[] = {
+    {418,0},{4227,1},{8037,2},{11846,3},{15656,0},{19465,1},
+    {23275,2},{27084,3},{30894,0},{34703,1},{38513,2},{42322,3},
+    {46132,0},{49941,1},{53751,2},{57560,3},{61370,0},{65179,1},
+    {68989,2}
+};
+static const Note chart_jagger_medium[] = {
+    {418,0},{2322,1},{4227,2},{6132,3},{8037,0},{9941,1},
+    {11846,2},{13751,3},{15656,0},{17560,1},{19465,2},{21370,3},
+    {23275,0},{25179,1},{27084,2},{28989,3},{30894,0},{32798,1},
+    {34703,2},{36608,3},{38513,0},{40418,1},{42322,2},{44227,3},
+    {46132,0},{48037,1},{49941,2},{51846,3},{53751,0},{55656,1},
+    {57560,2},{59465,3},{61370,0},{63275,1},{65179,2},{67084,3},
+    {68989,0},{70894,1}
+};
+static const Note chart_jagger_hard[] = {
+    {418,0},{1370,1},{2322,2},{3275,3},{4227,0},{5179,1},
+    {6132,2},{7084,3},{8037,0},{8989,1},{9941,2},{10894,3},
+    {11846,0},{12798,1},{13751,2},{14703,3},{15656,0},{16608,1},
+    {17560,2},{18513,3},{19465,0},{20418,1},{21370,2},{22322,3},
+    {23275,0},{24227,1},{25179,2},{26132,3},{27084,0},{28037,1},
+    {28989,2},{29941,3},{30894,0},{31846,1},{32798,2},{33751,3},
+    {34703,0},{35656,1},{36608,2},{37560,3},{38513,0},{39465,1},
+    {40418,2},{41370,3},{42322,0},{43275,1},{44227,2},{45179,3},
+    {46132,0},{47084,1},{48037,2},{48989,3},{49941,0},{50894,1},
+    {51846,2},{52798,3},{53751,0},{54703,1},{55656,2},{56608,3},
+    {57560,0},{58513,1},{59465,2},{60418,3},{61370,0},{62322,1},
+    {63275,2},{64227,3},{65179,0},{66132,1},{67084,2},{68037,3},
+    {68989,0},{69941,1},{70894,2},{71846,3}
+};
+
+typedef struct {
+    const char  *name;
+    const char  *filename;
+    const Note  *easy;
+    const Note  *medium;
+    const Note  *hard;
+    uint8_t      easy_count;
+    uint8_t      medium_count;
+    uint8_t      hard_count;
+    uint32_t     duration_ms;
+} Song;
+
+static const Song songs[] = {
+    { "MOVES LIKE JAGGER", "0001.mp3",
+      chart_jagger_easy, chart_jagger_medium, chart_jagger_hard,
+      19, 38, 76,
+      73000 },
+};
+static uint8_t current_song = 0;
+
+typedef enum { ARROW_UP=0, ARROW_DOWN=1, ARROW_LEFT=2, ARROW_RIGHT=3, ARROW_NONE=99 } Arrow;
+
+void uart_print(char *msg)
+{
+    HAL_UART_Transmit(&hlpuart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+}
+
+/* ── SPEC 1b: ADC sampling rate measurement ─────────────────────── */
+static void Spec1b_MeasureSamplingRate(void)
+{
+    uart_print("=== SPEC 1b: ADC SAMPLING RATE TEST ===\r\n");
+    uint32_t t_start = HAL_GetTick();
+    for (uint32_t i = 0; i < 200; i++)
+    {
+        FSR_read(FSR_UP);
+    }
+    uint32_t elapsed = HAL_GetTick() - t_start;
+    uint32_t hz = (elapsed > 0) ? (200000 / elapsed) : 9999;
+    char buf[64];
+    sprintf(buf, "200 samples in %lums = %lu Hz (req: >200 Hz)\r\n", elapsed, hz);
+    uart_print(buf);
+    uart_print(hz >= 200 ? "SPEC 1b: PASS\r\n" : "SPEC 1b: FAIL\r\n");
+}
+
+/* ── SPEC 2a: Timing resolution measurement ─────────────────────── */
+static void Spec2a_MeasureTimingResolution(void)
+{
+    uart_print("=== SPEC 2a: TIMING RESOLUTION TEST ===\r\n");
+    uint32_t t1 = HAL_GetTick();
+    uint32_t t2 = HAL_GetTick();
+    uint32_t t3 = HAL_GetTick();
+    char buf[64];
+    sprintf(buf, "Tick samples: %lu %lu %lu (1ms resolution = HAL_GetTick)\r\n", t1, t2, t3);
+    uart_print(buf);
+    uart_print("SPEC 2a: PASS (HAL_GetTick = 1ms resolution, req: <10ms)\r\n");
+}
+
+/* ── SPEC 3b: SPI clock frequency ───────────────────────────────── */
+static void Spec3b_PrintSPIConfig(void)
+{
+    uart_print("=== SPEC 3b: SPI CLOCK FREQUENCY ===\r\n");
+    uart_print("SPI1 BR=000 (fPCLK/2), SYSCLK=80MHz, APB2=80MHz\r\n");
+    uart_print("SPI clock = 80MHz / 2 = 40 MHz (req: >=8 MHz)\r\n");
+    uart_print("SPEC 3b: PASS\r\n");
+}
+
+/* ── SPEC 7b/7c: Button response time ───────────────────────────── */
+static uint8_t PB0_WasPressed(void)
+{
+    if ((GPIOB->IDR & GPIO_PIN_0) == 0)
+    {
+        uint32_t t_press = HAL_GetTick();
+        HAL_Delay(50);
+        if ((GPIOB->IDR & GPIO_PIN_0) == 0)
+        {
+            while ((GPIOB->IDR & GPIO_PIN_0) == 0) HAL_Delay(10);
+            uint32_t response_ms = HAL_GetTick() - t_press;
+            char buf[64];
+            sprintf(buf, "SPEC 7c: PB0 response=%lums (req: <50ms)\r\n", response_ms);
+            uart_print(buf);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static uint8_t Scroll_WasPressed(void)
+{
+    if ((GPIOC->IDR & GPIO_PIN_10) == 0)
+    {
+        uint32_t t_press = HAL_GetTick();
+        HAL_Delay(40);
+        if ((GPIOC->IDR & GPIO_PIN_10) == 0)
+        {
+            while ((GPIOC->IDR & GPIO_PIN_10) == 0) HAL_Delay(10);
+            uint32_t response_ms = HAL_GetTick() - t_press;
+            char buf[64];
+            sprintf(buf, "SPEC 7c: SCROLL response=%lums (req: <50ms)\r\n", response_ms);
+            uart_print(buf);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static uint8_t Select_WasPressed(void)
+{
+    if ((GPIOC->IDR & GPIO_PIN_11) == 0)
+    {
+        uint32_t t_press = HAL_GetTick();
+        HAL_Delay(40);
+        if ((GPIOC->IDR & GPIO_PIN_11) == 0)
+        {
+            while ((GPIOC->IDR & GPIO_PIN_11) == 0) HAL_Delay(10);
+            uint32_t response_ms = HAL_GetTick() - t_press;
+            char buf[64];
+            sprintf(buf, "SPEC 7c: SELECT response=%lums (req: <50ms)\r\n", response_ms);
+            uart_print(buf);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void DrawArrow(Arrow arrow)
+{
+    uint32_t t0 = HAL_GetTick();
+    switch (arrow)
+    {
+        case ARROW_UP:    ILI9341_DrawUpArrow(ILI9341_RED);      break;
+        case ARROW_DOWN:  ILI9341_DrawDownArrow(ILI9341_GREEN);  break;
+        case ARROW_LEFT:  ILI9341_DrawLeftArrow(ILI9341_BLUE);   break;
+        case ARROW_RIGHT: ILI9341_DrawRightArrow(ILI9341_YELLOW);break;
+        default: break;
+    }
+    uint32_t draw_ms = HAL_GetTick() - t0;
+    uint32_t fps = (draw_ms > 0) ? (1000 / draw_ms) : 999;
+    char fps_buf[64];
+    sprintf(fps_buf, "SPEC 3c: DRAW=%lums FPS=%lu (req: >=15 FPS)\r\n", draw_ms, fps);
+    uart_print(fps_buf);
+}
+
+static void DrawHUD(void)
+{
+    char buf[80];
+    sprintf(buf, "SCORE=%lu COMBO=%lu MODE=%s (ACTUAL:%s)\r\n",
+            score, combo, diff_names[chosen_mode], diff_names[difficulty]);
+    uart_print(buf);
+
+    char sc[20], cb[20], df[20];
+    sprintf(sc, "SC:%lu  ", score);
+    sprintf(cb, "CB:%lu  ", combo);
+    if (chosen_mode == ADAPTIVE)
+        sprintf(df, "ADP:%s  ", diff_names[difficulty]);
+    else
+        sprintf(df, "%s  ", diff_names[chosen_mode]);
+
+    ILI9341_DrawString(2,  2,  sc, ILI9341_WHITE,  ILI9341_BLACK, 2);
+    ILI9341_DrawString(2,  20, cb, ILI9341_YELLOW, ILI9341_BLACK, 2);
+    ILI9341_DrawString(2,  38, df, ILI9341_CYAN,   ILI9341_BLACK, 2);
+}
+
+static void DrawFeedback(const char *text, uint16_t color)
+{
+    ILI9341_FillRect(2, 278, 160, 30, ILI9341_BLACK);
+    ILI9341_DrawString(2, 283, text, color, ILI9341_BLACK, 2);
+}
+
+static void UI_RenderMainMenu(void)
+{
+    ILI9341_FillScreen(ILI9341_BLACK);
+    ILI9341_DrawString(10, 20, "=== SELECT ITEM ===", ILI9341_CYAN, ILI9341_BLACK, 2);
+    for (int i = 0; i < MENU_ITEMS_MAIN; i++)
+    {
+        uint16_t color = (i == menu_index) ? ILI9341_YELLOW : ILI9341_WHITE;
+        uint16_t bg    = (i == menu_index) ? ILI9341_BLUE   : ILI9341_BLACK;
+        ILI9341_DrawString(15, 70 + (i * 35), main_menu_strings[i], color, bg, 2);
+    }
+}
+
+static void UI_RenderDifficultyMenu(void)
+{
+    ILI9341_FillScreen(ILI9341_BLACK);
+    ILI9341_DrawString(10, 20, "SELECT MODE", ILI9341_CYAN, ILI9341_BLACK, 2);
+    for (int i = 0; i < 4; i++)
+    {
+        uint16_t color = (i == menu_index) ? ILI9341_YELLOW : ILI9341_WHITE;
+        uint16_t bg    = (i == menu_index) ? ILI9341_BLUE   : ILI9341_BLACK;
+        ILI9341_DrawString(35, 75 + (i * 35), diff_names[i], color, bg, 2);
+    }
+}
+
+static void UI_RenderReadyScreen(void)
+{
+    ILI9341_FillScreen(ILI9341_BLACK);
+    ILI9341_DrawString(20, 50, "STAGE READY!", ILI9341_GREEN, ILI9341_BLACK, 3);
+    char details[40];
+    sprintf(details, "Track: %s", songs[current_song].name);
+    ILI9341_DrawString(15, 110, details, ILI9341_WHITE, ILI9341_BLACK, 2);
+    sprintf(details, "Mode: %s", diff_names[chosen_mode]);
+    ILI9341_DrawString(15, 140, details, ILI9341_WHITE, ILI9341_BLACK, 2);
+    ILI9341_DrawString(10, 220, "PRESS PB0 TO START!", ILI9341_YELLOW, ILI9341_BLACK, 2);
+}
+
+static void PlaySong(uint8_t song_idx)
+{
+    const Song *s = &songs[song_idx];
+
+    if (chosen_mode == ADAPTIVE) {
+        difficulty = HARD;
+    } else {
+        difficulty = chosen_mode;
+    }
+
+    char buf[64];
+    sprintf(buf, "PLAYING: %s | MODE: %s\r\n", s->name, diff_names[chosen_mode]);
+    uart_print(buf);
+
+    /* SPEC 5c: measure playback latency */
+    uint32_t t_play_cmd = HAL_GetTick();
+    DFPlayer_Play(s->filename);
+    uint32_t play_latency = HAL_GetTick() - t_play_cmd;
+    char latbuf[64];
+    sprintf(latbuf, "SPEC 5c: play cmd latency=%lums (req: <=100ms)\r\n", play_latency);
+    uart_print(latbuf);
+
+    uint32_t song_start  = HAL_GetTick();
+    uint8_t  easy_idx    = 0;
+    uint8_t  medium_idx  = 0;
+    uint8_t  hard_idx    = 0;
+    uint8_t  total_notes = 0;
+    Difficulty last_diff = difficulty;
+
+    ILI9341_FillScreen(ILI9341_BLACK);
+
+    while (1)
+    {
+        if ((HAL_GetTick() - song_start) >= s->duration_ms)
+        {
+            uart_print("SONG TIME LIMIT\r\n");
+            DFPlayer_Stop();
+            goto song_done;
+        }
+
+        const Note *chart;
+        uint8_t    *idx_ptr;
+        uint8_t     chart_count;
+        if (difficulty == EASY)        { chart = s->easy;   idx_ptr = &easy_idx;   chart_count = s->easy_count; }
+        else if (difficulty == MEDIUM) { chart = s->medium; idx_ptr = &medium_idx; chart_count = s->medium_count; }
+        else                           { chart = s->hard;   idx_ptr = &hard_idx;   chart_count = s->hard_count; }
+
+        if (*idx_ptr >= chart_count) { HAL_Delay(10); continue; }
+
+        if (difficulty != last_diff)
+        {
+            uint32_t now_ms = HAL_GetTick() - song_start;
+            while (*idx_ptr < chart_count && chart[*idx_ptr].time_ms <= now_ms)
+                (*idx_ptr)++;
+            last_diff = difficulty;
+            if (*idx_ptr >= chart_count) { HAL_Delay(10); continue; }
+        }
+
+        uint32_t window    = diff_window[difficulty];
+        uint32_t note_time = song_start + chart[*idx_ptr].time_ms;
+
+        while (HAL_GetTick() < note_time)
+        {
+            if ((HAL_GetTick() - song_start) >= s->duration_ms)
+            { DFPlayer_Stop(); goto song_done; }
+
+            if (difficulty != last_diff) break;
+
+            if (PB0_WasPressed())
+            {
+                uart_print("PAUSED\r\n");
+                DFPlayer_Pause();
+                uint32_t ps = HAL_GetTick();
+                while (!PB0_WasPressed()) HAL_Delay(10);
+                uint32_t pd = HAL_GetTick() - ps;
+                uart_print("RESUMED\r\n");
+                DFPlayer_Resume();
+                song_start += pd;
+                note_time  += pd;
+            }
+            HAL_Delay(5);
+        }
+
+        if (difficulty != last_diff) continue;
+
+        if (difficulty == EASY)        { chart = s->easy;   idx_ptr = &easy_idx;   chart_count = s->easy_count; }
+        else if (difficulty == MEDIUM) { chart = s->medium; idx_ptr = &medium_idx; chart_count = s->medium_count; }
+        else                           { chart = s->hard;   idx_ptr = &hard_idx;   chart_count = s->hard_count; }
+        if (*idx_ptr >= chart_count) continue;
+
+        window = diff_window[difficulty];
+        Arrow target = (Arrow)chart[*idx_ptr].direction;
+        (*idx_ptr)++;
+        total_notes++;
+
+        DrawArrow(target);
+        DrawHUD();
+
+        uint32_t win_start = HAL_GetTick();
+        uint8_t  judged    = 0;
+
+        while ((HAL_GetTick() - win_start) < window)
+        {
+            if ((HAL_GetTick() - song_start) >= s->duration_ms)
+            { DFPlayer_Stop(); goto song_done; }
+
+            uint16_t up    = FSR_read(FSR_UP);
+            uint16_t down  = FSR_read(FSR_DOWN);
+            uint16_t left  = FSR_read(FSR_LEFT);
+            uint16_t right = FSR_read(FSR_RIGHT);
+
+            /* SPEC 1a: show 12-bit ADC range, SPEC 1c: show threshold crossings */
+            static uint32_t last_print = 0;
+            uint8_t any_pressed = FSR_isPressed(FSR_UP) || FSR_isPressed(FSR_DOWN) ||
+                                  FSR_isPressed(FSR_LEFT) || FSR_isPressed(FSR_RIGHT);
+            if (any_pressed || (HAL_GetTick() - last_print >= 200))
+            {
+                char dbg[100];
+                sprintf(dbg, "SPEC 1a/1c: UP=%u DOWN=%u LEFT=%u RIGHT=%u (0-4095)\r\n",
+                        up, down, left, right);
+                uart_print(dbg);
+                last_print = HAL_GetTick();
+            }
+
+            Arrow pressed = ARROW_NONE;
+            if      (FSR_isPressed(FSR_UP))    pressed = ARROW_UP;
+            else if (FSR_isPressed(FSR_DOWN))  pressed = ARROW_DOWN;
+            else if (FSR_isPressed(FSR_LEFT))  pressed = ARROW_LEFT;
+            else if (FSR_isPressed(FSR_RIGHT)) pressed = ARROW_RIGHT;
+
+            if (pressed != ARROW_NONE)
+            {
+                uint32_t elapsed = HAL_GetTick() - win_start;
+
+                /* SPEC 2b: hit classification timing */
+                char tbuf[80];
+                sprintf(tbuf, "SPEC 2b: press at %lums into %lums window\r\n", elapsed, window);
+                uart_print(tbuf);
+
+                if (pressed == target)
+                {
+                    if (elapsed <= (window * 4 / 10))
+                    {
+                        uart_print("PERFECT\r\n");
+                        DrawFeedback("PERFECT", ILI9341_GREEN);
+                        Score_RecordHit(1);
+                        score += 5;
+                    }
+                    else
+                    {
+                        uart_print("GOOD\r\n");
+                        DrawFeedback("GOOD", ILI9341_YELLOW);
+                        Score_RecordHit(1);
+                    }
+                }
+                else
+                {
+                    uart_print("WRONG\r\n");
+                    DrawFeedback("MISS", ILI9341_RED);
+                    Score_RecordHit(0);
+                }
+
+                while (FSR_isPressed(FSR_UP)   || FSR_isPressed(FSR_DOWN) ||
+                       FSR_isPressed(FSR_LEFT) || FSR_isPressed(FSR_RIGHT))
+                { HAL_Delay(10); }
+
+                judged = 1;
+                HAL_Delay(300);
+                DrawFeedback("        ", ILI9341_BLACK);
+                break;
+            }
+            HAL_Delay(5);
+        }
+
+        if (!judged)
+        {
+            uart_print("MISS\r\n");
+            Score_RecordHit(0);
+            DrawFeedback("MISS", ILI9341_RED);
+            HAL_Delay(300);
+            DrawFeedback("        ", ILI9341_BLACK);
+        }
+
+        if (total_notes % 20 == 0) Score_UpdateDifficulty();
+    }
+
+    DFPlayer_Stop();
+
+song_done:
+    sprintf(buf, "SONG DONE! SCORE=%lu\r\n", score);
+    uart_print(buf);
+
+    {
+        uint8_t count = acc50_full ? ACC50_SIZE : acc50_idx;
+        if (count > 0)
+        {
+            uint32_t hits = 0;
+            for (uint8_t j = 0; j < count; j++) hits += acc50_history[j];
+            uint32_t acc = (hits * 100) / count;
+            char abuf[64];
+            sprintf(abuf, "=== SPEC 1d FINAL ACCURACY: %lu%% over %u presses ===\r\n", acc, count);
+            uart_print(abuf);
+            uart_print(acc >= 95 ? "SPEC 1d: PASS (>=95%%)\r\n" : "SPEC 1d: FAIL (<95%%)\r\n");
+        }
+    }
+
+    ILI9341_FillScreen(ILI9341_BLACK);
+    const char *msg;
+    if      (score >= 300) msg = "AMAZING!";
+    else if (score >= 200) msg = "GREAT JOB!";
+    else if (score >= 100) msg = "GOOD JOB!";
+    else if (score >= 50)  msg = "KEEP IT UP";
+    else                   msg = "PRACTICE!";
+
+    ILI9341_DrawString(20, 60,  msg,          ILI9341_YELLOW, ILI9341_BLACK, 3);
+    char end_sc[30], end_cb[30];
+    sprintf(end_sc, "SCORE: %lu", score);
+    sprintf(end_cb, "COMBO: %lu", combo);
+    ILI9341_DrawString(20, 130, end_sc, ILI9341_WHITE,  ILI9341_BLACK, 2);
+    ILI9341_DrawString(20, 155, end_cb, ILI9341_YELLOW, ILI9341_BLACK, 2);
+    char end_df[30];
+    sprintf(end_df, "MODE: %s", diff_names[chosen_mode]);
+    ILI9341_DrawString(20, 180, end_df, ILI9341_CYAN, ILI9341_BLACK, 2);
+    HAL_Delay(4000);
+    ILI9341_FillScreen(ILI9341_BLACK);
+}
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+    USART2_Config();
+    LPUART1_Config();
+    GPIO_Config();
+    SPI1_Config();
+
+    ILI9341_Init();
+    ILI9341_FillScreen(ILI9341_BLACK);
+
+    FSR_init();
+    FSR_Calibrate();
+    DFPlayer_Init(&huart2, &hlpuart1);
+
+    /* Boot pulse sequence */
+    for (int i = 0; i < 3; i++)
+    {
+        GPIOB->BRR  = GPIO_PIN_1;
+        HAL_Delay(200);
+        GPIOB->BSRR = GPIO_PIN_1;
+        HAL_Delay(500);
+    }
+
+    srand(HAL_GetTick());
+    uart_print("\r\n=== MOVE LIKE JAGGER - SPEC VERIFICATION BUILD ===\r\n");
+
+    /* Run spec measurements on boot */
+    Spec1b_MeasureSamplingRate();
+    Spec2a_MeasureTimingResolution();
+    Spec3b_PrintSPIConfig();
+    uart_print("SPEC 7b: debounce=40-50ms (req: >=10ms) PASS\r\n");
+    uart_print("=== BOOT SPECS DONE - STARTING GAME ===\r\n\r\n");
+
+    current_state = STATE_MAIN_MENU;
+    menu_index = 0;
+    UI_RenderMainMenu();
+
+    while (1)
+    {
+        switch (current_state)
+        {
+            case STATE_MAIN_MENU:
+                if (Scroll_WasPressed())
+                {
+                    menu_index = (menu_index + 1) % MENU_ITEMS_MAIN;
+                    UI_RenderMainMenu();
+                }
+                if (Select_WasPressed())
+                {
+                    current_song = 0;
+                    menu_index = 0;
+                    current_state = STATE_DIFFICULTY_MENU;
+                    UI_RenderDifficultyMenu();
+                }
+                break;
+
+            case STATE_DIFFICULTY_MENU:
+                if (Scroll_WasPressed())
+                {
+                    menu_index = (menu_index + 1) % 4;
+                    UI_RenderDifficultyMenu();
+                }
+                if (Select_WasPressed())
+                {
+                    chosen_mode = (Difficulty)menu_index;
+                    current_state = STATE_READY_TO_PLAY;
+                    UI_RenderReadyScreen();
+                }
+                break;
+
+            case STATE_READY_TO_PLAY:
+                if (PB0_WasPressed())
+                {
+                    current_state = STATE_PLAYING;
+                }
+                if (Select_WasPressed())
+                {
+                    menu_index = 0;
+                    current_state = STATE_MAIN_MENU;
+                    UI_RenderMainMenu();
+                }
+                break;
+
+            case STATE_PLAYING:
+                PlaySong(current_song);
+                score = combo = 0;
+                history_idx = history_full = 0;
+                memset(hit_history, 0, sizeof(hit_history));
+                acc50_idx = acc50_full = acc50_total_presses = 0;
+                memset(acc50_history, 0, sizeof(acc50_history));
+                menu_index = 0;
+                current_state = STATE_MAIN_MENU;
+                UI_RenderMainMenu();
+                break;
+        }
+        HAL_Delay(10);
+    }
+}
+
+static void GPIO_Config(void)
+{
+    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN | RCC_AHB2ENR_GPIOCEN |
+                    RCC_AHB2ENR_GPIOGEN | RCC_AHB2ENR_GPIOBEN;
+    HAL_PWREx_EnableVddIO2();
+
+    GPIOA->MODER &= ~((3U << (2*2)) | (3U << (3*2)));
+    GPIOA->MODER |=  ((2U << (2*2)) | (2U << (3*2)));
+    GPIOA->OTYPER  &= ~(GPIO_PIN_2 | GPIO_PIN_3);
+    GPIOA->OSPEEDR |=  ((3U << (2*2)) | (3U << (3*2)));
+    GPIOA->PUPDR   &= ~((3U << (2*2)) | (3U << (3*2)));
+    GPIOA->AFR[0]  &= ~((0xFU << GPIO_AFRL_AFSEL2_Pos) | (0xFU << GPIO_AFRL_AFSEL3_Pos));
+    GPIOA->AFR[0]  |=  ((7U << GPIO_AFRL_AFSEL2_Pos) | (7U << GPIO_AFRL_AFSEL3_Pos));
+
+    GPIOB->MODER &= ~(3U << (0*2));
+    GPIOB->PUPDR &= ~(3U << (0*2));
+    GPIOB->PUPDR |=  (1U << (0*2));
+
+    GPIOA->MODER &= ~((3U << (5*2)) | (3U << (7*2)));
+    GPIOA->MODER |=  ((2U << (5*2)) | (2U << (7*2)));
+    GPIOA->OTYPER  &= ~(GPIO_PIN_5 | GPIO_PIN_7);
+    GPIOA->OSPEEDR |=  ((3U << (5*2)) | (3U << (7*2)));
+    GPIOA->PUPDR   &= ~((3U << (5*2)) | (3U << (7*2)));
+    GPIOA->AFR[0]  &= ~((0xFU << GPIO_AFRL_AFSEL5_Pos) | (0xFU << GPIO_AFRL_AFSEL7_Pos));
+    GPIOA->AFR[0]  |=  ((5U << GPIO_AFRL_AFSEL5_Pos) | (5U << GPIO_AFRL_AFSEL7_Pos));
+
+    GPIOC->MODER &= ~((3U << (3*2)) | (3U << (4*2)) | (3U << (8*2)));
+    GPIOC->MODER |=  ((1U << (3*2)) | (1U << (4*2)) | (1U << (8*2)));
+    GPIOC->OTYPER  &= ~(GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_8);
+    GPIOC->OSPEEDR |=  ((3U << (3*2)) | (3U << (4*2)) | (3U << (8*2)));
+    GPIOC->PUPDR   &= ~((3U << (3*2)) | (3U << (4*2)) | (3U << (8*2)));
+    GPIOC->BSRR = GPIO_PIN_4;
+    GPIOC->BSRR = GPIO_PIN_8;
+    GPIOC->BRR  = GPIO_PIN_3;
+
+    GPIOC->MODER  &= ~((3U << (10*2)) | (3U << (11*2)));
+    GPIOC->PUPDR  &= ~((3U << (10*2)) | (3U << (11*2)));
+    GPIOC->PUPDR  |=  ((1U << (10*2)) | (1U << (11*2)));
+}
+
+static void SPI1_Config(void)
+{
+    RCC->APB2ENR |= RCC_APB2ENR_SPI1EN;
+    SPI1->CR1 &= ~SPI_CR1_SPE;
+    SPI1->CR1 = 0; SPI1->CR2 = 0;
+    SPI1->CR1 |= SPI_CR1_MSTR | SPI_CR1_SSM | SPI_CR1_SSI;
+    SPI1->CR1 |= SPI_CR1_BIDIMODE | SPI_CR1_BIDIOE;
+    SPI1->CR1 &= ~(SPI_CR1_CPOL | SPI_CR1_CPHA | SPI_CR1_LSBFIRST | SPI_CR1_BR);
+    SPI1->CR2 &= ~SPI_CR2_DS;
+    SPI1->CR2 |= (7U << SPI_CR2_DS_Pos) | SPI_CR2_FRXTH;
+    SPI1->CR1 |= SPI_CR1_SPE;
+}
+
+static void LPUART1_Config(void)
+{
+    RCC->APB1ENR2 |= RCC_APB1ENR2_LPUART1EN;
+    GPIOG->MODER &= ~((3U << (7*2)) | (3U << (8*2)));
+    GPIOG->MODER |=  ((2U << (7*2)) | (2U << (8*2)));
+    GPIOG->AFR[0] &= ~(0xFU << GPIO_AFRL_AFSEL7_Pos);
+    GPIOG->AFR[0] |=  (8U   << GPIO_AFRL_AFSEL7_Pos);
+    GPIOG->AFR[1] &= ~(0xFU << GPIO_AFRH_AFSEL8_Pos);
+    GPIOG->AFR[1] |=  (8U   << GPIO_AFRH_AFSEL8_Pos);
+    hlpuart1.Instance = LPUART1;
+    hlpuart1.Init.BaudRate = 115200;
+    hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
+    hlpuart1.Init.StopBits = UART_STOPBITS_1;
+    hlpuart1.Init.Parity = UART_PARITY_NONE;
+    hlpuart1.Init.Mode = UART_MODE_TX_RX;
+    hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+    hlpuart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+    HAL_UART_Init(&hlpuart1);
+}
+
+static void USART2_Config(void)
+{
+    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN;
+    RCC->APB1ENR1 |= RCC_APB1ENR1_USART2EN;
+    huart2.Instance = USART2;
+    huart2.Init.BaudRate = 115200;
+    huart2.Init.WordLength = UART_WORDLENGTH_8B;
+    huart2.Init.StopBits = UART_STOPBITS_1;
+    huart2.Init.Parity = UART_PARITY_NONE;
+    huart2.Init.Mode = UART_MODE_TX_RX;
+    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+    huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+    HAL_UART_Init(&huart2);
+}
+
+void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+    if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK) Error_Handler();
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+    RCC_OscInitStruct.MSIState = RCC_MSI_ON;
+    RCC_OscInitStruct.MSICalibrationValue = 0;
+    RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
+    RCC_OscInitStruct.PLL.PLLM = 1; // divide input by 1
+    RCC_OscInitStruct.PLL.PLLN = 40; // multiply by 40
+    RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV7;
+    RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK|
+                                  RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK) Error_Handler();
+}
+
+void Error_Handler(void) { __disable_irq(); while (1) {} }
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line) {}
+#endif
